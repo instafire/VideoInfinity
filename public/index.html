@@ -1,0 +1,1051 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mya Studio 20.7</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background: radial-gradient(circle at top right, #1e1b4b, #020617); color: #e2e8f0; font-family: 'Inter', sans-serif; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        .glass-panel { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3); }
+        .glass-input { background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(255, 255, 255, 0.1); color: white; transition: all 0.2s; }
+        .glass-input:focus { border-color: #3b82f6; box-shadow: 0 0 10px rgba(59, 130, 246, 0.2); outline: none; }
+        .glass-btn { background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.3); color: #60a5fa; transition: all 0.2s; }
+        .glass-btn:hover { background: rgba(59, 130, 246, 0.4); box-shadow: 0 0 15px rgba(59, 130, 246, 0.4); transform: translateY(-1px); color: white; }
+        select { background-color: #0f172a !important; color: white !important; border: 1px solid rgba(255,255,255,0.1); }
+        option { background-color: #020617; color: white; }
+        .timeline-container { height: 32px; background: rgba(0,0,0,0.3); border-radius: 8px; position: relative; overflow: hidden; cursor: pointer; border: 1px solid rgba(255,255,255,0.1); }
+        .timeline-playhead { height: 100%; width: 2px; background: #ef4444; position: absolute; z-index: 10; pointer-events: none; box-shadow: 0 0 8px #ef4444; }
+        .timeline-fill { height: 100%; background: rgba(59, 130, 246, 0.3); position: absolute; }
+        .marker-start { background: #60a5fa; height:100%; width:2px; position:absolute; z-index:5; }
+        .marker-end { background: #c084fc; height:100%; width:2px; position:absolute; z-index:5; }
+        .time-label { position: absolute; top: -20px; font-size: 10px; font-weight: bold; padding: 1px 4px; border-radius: 4px; pointer-events: none; white-space: nowrap; transform: translateX(-50%); }
+        .label-start { background: #60a5fa; color: #000; }
+        .label-end { background: #c084fc; color: #000; }
+        .choice-card-overlay { transition: all 0.2s; cursor: pointer; border: 2px solid transparent; border-radius: 0.5rem; overflow: hidden; box-shadow: 0 4px 10px rgba(0,0,0,0.5); position: relative; }
+        .choice-card-overlay:hover { transform: scale(1.05); border-color: #3b82f6; box-shadow: 0 0 20px rgba(59,130,246,0.6); }
+        .toast-enter-active, .toast-leave-active { transition: all 0.3s ease; }
+        .toast-enter-from, .toast-leave-to { opacity: 0; transform: translateY(20px); }
+        .marker-trigger { width: 4px; height: 100%; background: #fbbf24; position: absolute; top: 0; cursor: pointer; z-index: 8; box-shadow: 0 0 4px #fbbf24; }
+        .marker-trigger:hover { background: #fff; transform: scaleX(1.5); }
+        
+        /* --- NEW GRAPH VISUALS (GRID & CARDS) --- */
+        .node-graph-grid {
+            background-color: #0f111a;
+            background-image: linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+            background-size: 40px 40px;
+            cursor: grab;
+            position: relative;
+            overflow: hidden;
+        }
+        .node-graph-grid:active { cursor: grabbing; }
+
+        .graph-node {
+            position: absolute; width: 220px; height: 130px;
+            background: #1e293b; border-radius: 12px;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+            transition: border-color 0.2s, transform 0.2s;
+            display: flex; flex-direction: column; overflow: hidden;
+            border: 2px solid #475569; z-index: 10;
+        }
+        .graph-node:hover { transform: scale(1.02); z-index: 20; border-color: #60a5fa; }
+        
+        /* Source Node (Green) */
+        .graph-node.is-source { border-color: #10b981; box-shadow: 0 0 25px rgba(16, 185, 129, 0.2); }
+        /* Target Node (Orange) */
+        .graph-node.is-target { border-color: #f97316; box-shadow: 0 0 15px rgba(249, 115, 22, 0.15); }
+
+        .node-thumb { width: 100%; height: 90px; object-fit: cover; background: #000; }
+        .node-footer { padding: 8px; background: rgba(0,0,0,0.85); flex: 1; display: flex; align-items: center; justify-content: center; }
+        .node-title { font-size: 11px; font-weight: bold; text-align: center; color: white; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%; }
+        .play-icon { position: absolute; top: 35px; left: 50%; transform: translate(-50%, -50%); font-size: 24px; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.8)); opacity: 0.8; }
+
+        /* Curved Lines */
+        svg.connections { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; }
+        path.connection-line { fill: none; stroke: #f97316; stroke-width: 3px; transition: stroke 0.3s; opacity: 0.8; }
+        path.connection-line.is-return { stroke-dasharray: 8, 4; stroke: #ef4444; } 
+
+        /* Edge Labels (Bubbles) */
+        .edge-label {
+            position: absolute; transform: translate(-50%, -50%);
+            background: #0f172a; border: 1px solid #f97316; color: #fdba74;
+            padding: 4px 12px; border-radius: 20px; font-size: 10px; font-weight: bold;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.5); pointer-events: none; z-index: 15;
+            white-space: nowrap; letter-spacing: 0.5px;
+        }
+        
+        .preview-overlay { position: fixed; inset: 0; background: black; z-index: 100; display: flex; flex-direction: column; }
+        .preview-card { cursor: pointer; border: 1px solid rgba(255,255,255,0.2); transition: all 0.2s; position: relative; overflow: hidden; background: rgba(0,0,0,0.6); backdrop-filter: blur(10px); }
+        .preview-card:hover { transform: scale(1.05); border-color: #3b82f6; box-shadow: 0 0 20px rgba(59,130,246,0.5); }
+        .preview-card.locked { opacity: 0.5; filter: grayscale(1); pointer-events: none; }
+        [v-cloak] { display: none; }
+    </style>
+</head>
+<body class="h-screen w-screen overflow-hidden flex flex-col">
+
+<div id="app" class="flex-1 flex flex-col h-full w-full min-h-0" v-cloak>
+
+    <div class="flex-shrink-0 flex justify-between items-center px-6 py-3 glass-panel z-20 m-2 rounded-2xl">
+        <div class="flex items-center gap-4 cursor-pointer" @click="view='projects'">
+            <span class="text-3xl">🎬</span>
+            <div><h1 class="font-bold text-white text-xl tracking-tight"> Mya Studio 20.7 </h1><div class="text-[10px] text-blue-400 uppercase tracking-widest font-bold">{{ currentProject ? currentProject.title : 'Select Project' }}</div></div>
+        </div>
+        <div class="flex gap-2" v-if="currentProject">
+            <button @click="view='upload'" :class="navClass('upload')">1. Import</button>
+            <button @click="view='clipper'" :class="navClass('clipper')">2. Editor</button>
+            <button @click="view='library'" :class="navClass('library')">3. Library</button>
+            <button @click="view='eventCreator'" :class="navClass('eventCreator')">⚡ Events</button>
+            <button @click="view='logic'" :class="navClass('logic')">4. Logic</button>
+            <button @click="fetchStats" :class="navClass('stats')">5. Stats</button>
+            <button @click="view='publish'; refreshData(); fetchExports()" :class="navClass('publish')">6. Publish</button>
+        </div>
+    </div>
+
+    <div class="flex-1 min-h-0 overflow-hidden relative flex flex-col">
+
+        <div v-if="view === 'projects'" class="flex-1 p-10 overflow-y-auto flex flex-col items-center">
+            <div class="w-full max-w-5xl">
+                <div class="flex justify-between items-center mb-8"><h2 class="text-3xl font-bold text-white">Project Library</h2><button @click="createProject" class="glass-btn px-6 py-2 rounded-xl font-bold">+ New Project</button></div>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <div v-for="p in projects" :key="p.id" class="glass-panel p-6 hover:border-blue-500 transition cursor-pointer relative group" @click="selectProject(p)">
+                        <h3 class="text-xl font-bold text-white mb-2 group-hover:text-blue-400 transition">{{ p.title }}</h3><p class="text-xs text-slate-400">Created: {{ new Date(p.created_at).toLocaleDateString() }}</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="view === 'upload'" class="flex-1 flex items-center justify-center p-6 overflow-y-auto">
+            <div class="glass-panel p-12 text-center w-full max-w-2xl">
+                <div class="text-7xl mb-6 opacity-80 filter drop-shadow-lg">📤</div>
+                <h2 class="text-3xl font-bold mb-4 text-white">Import Media</h2>
+                <input type="file" ref="fileInput" class="hidden" @change="handleFileSelect">
+                <button @click="$refs.fileInput.click()" class="glass-input w-full py-8 rounded-2xl border-dashed mb-6 hover:bg-white/5"><span class="block text-xl font-bold transition">{{ selectedFile ? selectedFile.name : 'Click to Browse Files' }}</span></button>
+                <button v-if="selectedFile" @click="uploadVideo" class="glass-btn bg-blue-600/20 text-white w-full py-4 rounded-xl font-bold text-lg" :disabled="uploading">{{ uploading ? 'Uploading...' : 'Import to Project' }}</button>
+            </div>
+        </div>
+
+        <div v-if="view === 'clipper'" class="flex-1 flex gap-4 p-4 overflow-hidden">
+            <div class="flex-1 flex flex-col glass-panel overflow-hidden min-w-0">
+                <div class="flex-shrink-0 p-3 flex gap-4 items-center border-b border-white/5">
+                    <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Source</span>
+                    <select v-model="selectedVidId" @change="loadVideo" class="glass-input rounded-lg px-3 py-2 text-sm flex-1"><option :value="null">-- Select Video --</option><option v-for="v in videos" :value="v.id">📂 {{ v.filename }} ({{ formatDuration(v.duration) }})</option></select>
+                    <button @click="deleteVideo" v-if="selectedVidId" class="text-red-400 hover:text-red-300 px-3 transition">🗑️</button>
+                </div>
+                <div class="flex-1 relative bg-black/50 flex items-center justify-center overflow-hidden">
+                    <video v-if="videoUrl" ref="video" :src="videoUrl" @timeupdate="updateProgress" controls class="max-h-full max-w-full object-contain"></video>
+                </div>
+                <div class="p-2 border-t border-white/5 flex gap-6 items-center overflow-x-auto bg-black/20 flex-shrink-0">
+                    <div><label class="text-[10px] text-slate-400 font-bold uppercase block mb-1">Filter</label><select v-model="clipFilter" class="glass-input text-xs p-1 rounded w-24"><option value="none">None</option><option value="bw">BW</option><option value="sepia">Sepia</option><option value="vivid">Vivid</option></select></div>
+                    <div><label class="text-[10px] text-slate-400 font-bold uppercase block mb-1">Speed: {{clipSpeed}}x</label><input type="range" min="0.5" max="2.0" step="0.5" v-model="clipSpeed" class="w-24 accent-blue-500"></div>
+                    <div><label class="text-[10px] text-slate-400 font-bold uppercase block mb-1">Volume: {{clipVolume}}</label><input type="range" min="0" max="2.0" step="0.1" v-model="clipVolume" class="w-24 accent-green-500"></div>
+                </div>
+                <div class="flex-shrink-0 p-4 border-t border-white/5">
+                    <div class="timeline-container mb-4" @click="seekTimeline">
+                        <div class="timeline-playhead" :style="{left: playheadPercent + '%'}"></div>
+                        <div class="timeline-fill" :style="{left: startPercent + '%', width: (endPercent - startPercent) + '%'}"></div>
+                        <div class="timeline-marker marker-start" :style="{left: startPercent + '%'}"><div class="time-label label-start">{{ formatDuration(clipStart) }}</div></div>
+                        <div class="timeline-marker marker-end" :style="{left: endPercent + '%'}"><div class="time-label label-end">{{ formatDuration(clipEnd) }}</div></div>
+                    </div>
+                    <div class="flex gap-3">
+                        <div class="flex items-center gap-1 glass-input rounded-lg"><button @click="nudge('start', -0.1)" class="p-2 text-slate-400 hover:text-white">➖</button><button @click="setStart" class="px-2 text-blue-400 font-bold text-xs">IN</button><button @click="nudge('start', 0.1)" class="p-2 text-slate-400 hover:text-white">➕</button></div>
+                        <div class="flex items-center gap-1 glass-input rounded-lg"><button @click="nudge('end', -0.1)" class="p-2 text-slate-400 hover:text-white">➖</button><button @click="setEnd" class="px-2 text-purple-400 font-bold text-xs">OUT</button><button @click="nudge('end', 0.1)" class="p-2 text-slate-400 hover:text-white">➕</button></div>
+                        <input v-model="clipName" placeholder="Scene Name..." class="glass-input flex-1 px-4 rounded-xl font-bold text-sm">
+                        <button @click="cutClip" class="glass-btn px-6 rounded-xl font-bold text-sm">✂️ CREATE</button>
+                    </div>
+                </div>
+            </div>
+            <div class="w-72 glass-panel flex flex-col overflow-hidden">
+                <div class="p-4 border-b border-white/5 flex-shrink-0"><span class="font-bold text-white text-sm uppercase">Quick Library</span></div>
+                <div class="flex-1 overflow-y-auto p-3 space-y-3">
+                    <div v-for="c in clips" :key="c.id" class="flex gap-3 p-2 rounded-xl border border-white/5 hover:bg-white/5 transition relative group">
+                        <div class="w-20 h-12 bg-black rounded overflow-hidden flex-shrink-0"><img v-if="c.thumbnail" :src="c.thumbnail" class="w-full h-full object-cover"></div>
+                        <div class="flex-1 min-w-0 flex flex-col justify-center"><div class="font-bold text-white text-xs truncate">{{ c.name }}</div><div class="text-[10px] text-blue-400 font-mono">{{ c.duration.toFixed(1) }}s</div></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div v-if="view === 'eventCreator'" class="flex-1 flex gap-4 p-4 overflow-hidden relative">
+            <div class="flex-1 flex flex-col glass-panel overflow-hidden min-w-0 relative">
+                <div class="flex-shrink-0 p-3 flex gap-4 items-center border-b border-white/5 bg-indigo-900/20">
+                    <span class="text-xs font-bold text-indigo-300 uppercase tracking-wider">{{ isEditingEvent ? '✏️ Editing Event: ' + clipName : 'Event Generator' }}</span>
+                    <select v-if="!isEditingEvent" v-model="selectedVidId" @change="loadVideo" class="glass-input rounded-lg px-3 py-2 text-sm flex-1"><option :value="null">-- Select Source Video --</option><option v-for="v in videos" :value="v.id">📂 {{ v.filename }} ({{ formatDuration(v.duration) }})</option></select>
+                    <div v-else class="flex-1 text-xs text-slate-400 italic px-2">Video source locked while editing choices.</div>
+                </div>
+                <div class="flex-1 relative bg-black/50 flex items-center justify-center overflow-hidden">
+                    <video v-if="videoUrl" ref="eventVideo" :src="videoUrl" @timeupdate="updateEventProgress" controls class="max-h-full max-w-full object-contain"></video>
+                </div>
+                <div class="flex-shrink-0 p-4 border-t border-white/5">
+                    <div v-if="!isEditingEvent">
+                        <div class="timeline-container mb-4" @click="seekEventTimeline">
+                            <div class="timeline-playhead" :style="{left: playheadPercent + '%'}"></div>
+                            <div class="timeline-fill bg-indigo-500/30" :style="{left: startPercent + '%', width: (endPercent - startPercent) + '%'}"></div>
+                            <div class="timeline-marker marker-start" :style="{left: startPercent + '%'}"><div class="time-label label-start">{{ formatDuration(clipStart) }}</div></div>
+                            <div class="timeline-marker marker-end" :style="{left: endPercent + '%'}"><div class="time-label label-end">{{ formatDuration(clipEnd) }}</div></div>
+                        </div>
+                        <div class="flex gap-4 mb-4">
+                             <div class="flex items-center gap-1 glass-input rounded-lg"><button @click="nudge('start', -0.1)" class="p-2 text-slate-400 hover:text-white">➖</button><button @click="setStart" class="px-2 text-blue-400 font-bold text-xs">IN</button><button @click="nudge('start', 0.1)" class="p-2 text-slate-400 hover:text-white">➕</button></div>
+                             <div class="flex items-center gap-1 glass-input rounded-lg"><button @click="nudge('end', -0.1)" class="p-2 text-slate-400 hover:text-white">➖</button><button @click="setEnd" class="px-2 text-purple-400 font-bold text-xs">OUT</button><button @click="nudge('end', 0.1)" class="p-2 text-slate-400 hover:text-white">➕</button></div>
+                             <input v-model="clipName" placeholder="Event Clip Name..." class="glass-input flex-1 px-4 rounded-xl font-bold text-sm border-indigo-500/30">
+                        </div>
+                    </div>
+                    <div v-else class="mb-4">
+                        <label class="text-xs text-slate-400 font-bold uppercase block mb-1">Event Name</label>
+                        <input v-model="clipName" class="glass-input w-full px-4 py-2 rounded-xl font-bold text-sm border-indigo-500/30">
+                    </div>
+
+                    <div class="bg-black/20 rounded-xl p-4 border border-indigo-500/20">
+                        <h4 class="text-xs font-bold text-indigo-400 uppercase mb-3">Logic Options (Triggers at End)</h4>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                            <div v-for="(opt, idx) in eventChoices" :key="idx" class="bg-black/40 p-2 rounded border border-white/10 flex flex-col gap-2">
+                                <div class="flex gap-2 items-center">
+                                    <input type="color" v-model="opt.color" class="bg-transparent border-none h-6 w-6 cursor-pointer p-0">
+                                    <input v-model="opt.label" class="glass-input flex-1 p-1 rounded text-xs" placeholder="Button Label">
+                                    <button @click="eventChoices.splice(idx,1)" class="text-red-400 hover:text-white px-1">✕</button>
+                                </div>
+                                <select v-model="opt.toId" class="glass-input w-full p-1 rounded text-[10px]">
+                                    <option :value="null">-- Select Target Clip --</option>
+                                    <optgroup label="Event Clips"><option v-for="c in eventClips" :value="c.unique_id">⚡ {{ c.name }}</option></optgroup>
+                                    <optgroup label="Standard Clips"><option v-for="c in subClips" :value="c.unique_id">{{ c.name }}</option></optgroup>
+                                </select>
+                                <div class="flex items-center gap-2 mt-1">
+                                    <label class="text-[9px] text-yellow-400"><input type="checkbox" v-model="opt.returnToMain" class="mr-1">Return</label>
+                                    <input v-model="opt.setVar" placeholder="Set Var" class="glass-input flex-1 p-1 rounded text-[9px]">
+                                </div>
+                            </div>
+                            <button v-if="eventChoices.length < 4" @click="eventChoices.push({label:'', toId:null, color:'#ffffff', returnToMain:false, setVar:''})" class="border border-white/10 border-dashed rounded flex items-center justify-center text-slate-500 hover:text-white hover:border-indigo-500 transition h-[100px] font-bold text-2xl">+</button>
+                        </div>
+                        <div class="flex gap-3">
+                            <button v-if="!isEditingEvent" @click="createEventClip" class="glass-btn bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 w-full py-2 rounded-lg font-bold text-sm">⚡ Generate Event Logic Clip</button>
+                            <button v-if="isEditingEvent" @click="saveEventChanges" class="glass-btn flex-1 bg-green-600/20 hover:bg-green-600/40 text-green-300 py-2 rounded-lg font-bold text-sm">💾 Save Changes</button>
+                            <button v-if="isEditingEvent" @click="cancelEventEdit" class="glass-btn flex-1 bg-slate-600/20 hover:bg-slate-600/40 text-slate-300 py-2 rounded-lg font-bold text-sm">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div v-if="previewEventClip" class="absolute inset-0 bg-black z-50 flex flex-col">
+                    <div class="p-3 bg-indigo-900/40 flex justify-between items-center border-b border-indigo-500/30">
+                        <div class="font-bold text-white flex gap-2 items-center">
+                            <span>⚡ Playtest Mode:</span> 
+                            <span class="text-indigo-300">{{ previewEventClip.name }}</span>
+                            <span v-if="testIsReturning" class="bg-yellow-600 text-[10px] px-2 py-0.5 rounded text-white">Returning</span>
+                        </div>
+                        <button @click="closeTestEvent" class="bg-red-600 hover:bg-red-500 px-3 py-1 rounded text-xs font-bold text-white">Exit Test</button>
+                    </div>
+                    <div class="flex-1 relative flex items-center justify-center overflow-hidden">
+                        <video ref="testPlayer" :src="previewEventClip.filepath" autoplay class="max-w-full max-h-full object-contain" @timeupdate="checkTestLogic" @ended="handleTestEnd"></video>
+                        <div v-if="showTestChoices" class="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col justify-end pb-10 z-10 animate-fade-in">
+                            <h2 class="text-center text-3xl font-bold text-white mb-6 drop-shadow-md">Make Your Choice</h2>
+                            <div class="flex flex-wrap gap-8 justify-center px-10">
+                                <div v-for="(opt, idx) in testChoices" :key="idx" class="choice-card-overlay glass-panel w-48 h-28 relative group overflow-hidden" @click="simulateChoice(opt)">
+                                    <img v-if="getClipThumb(opt.to_id)" :src="getClipThumb(opt.to_id)" class="absolute inset-0 w-full h-full object-cover opacity-80 group-hover:opacity-100 transition duration-300">
+                                    <div class="absolute bottom-0 left-0 w-full p-2 text-center font-bold text-sm tracking-wide bg-black/60 backdrop-blur-sm" :style="{color: opt.text_color}">{{ opt.label || 'Option '+(idx+1) }}</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="w-64 glass-panel flex flex-col overflow-hidden">
+                <div class="p-4 border-b border-white/5 flex-shrink-0"><span class="font-bold text-white text-sm uppercase">Existing Events</span></div>
+                <div class="flex-1 overflow-y-auto p-3 space-y-3">
+                    <div v-if="eventClips.length === 0" class="text-slate-500 text-xs text-center py-4">No events created.</div>
+                    <div v-for="c in eventClips" :key="c.id" class="flex flex-col gap-1 p-3 rounded-xl border border-indigo-500/30 bg-indigo-900/10 hover:bg-indigo-900/20 transition cursor-pointer group">
+                        <div class="flex justify-between items-start">
+                             <div class="font-bold text-indigo-200 text-xs truncate">{{ c.name }}</div>
+                             <div class="flex gap-1">
+                                 <button @click="editEvent(c)" class="text-[10px] bg-indigo-600/50 hover:bg-indigo-500 text-white px-2 py-0.5 rounded">✎</button>
+                                 <div class="text-[9px] text-slate-400 font-mono pt-0.5">{{ c.duration.toFixed(1) }}s</div>
+                             </div>
+                        </div>
+                        <div class="flex gap-2 mt-2">
+                             <button @click="testEventClip(c)" class="flex-1 bg-green-600/20 hover:bg-green-600 text-green-400 hover:text-white text-[10px] py-1 rounded border border-green-600/30">▶ Test Logic</button>
+                             <button @click="copyToClipboard(c.unique_id)" class="px-2 bg-slate-700/50 hover:bg-slate-600 text-slate-300 text-[10px] rounded border border-white/10">ID</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="view === 'library'" class="flex-1 flex gap-6 p-6 overflow-hidden">
+            <div class="w-80 glass-panel flex flex-col overflow-hidden">
+                <div class="p-4 border-b border-white/5 flex-shrink-0"><h3 class="font-bold text-white text-sm uppercase">All Clips</h3></div>
+                <div class="flex-1 overflow-y-auto p-3 space-y-2">
+                    <div v-for="c in clips" :key="c.id" class="flex items-center gap-3 p-3 rounded-lg cursor-pointer transition border" :class="librarySelectedClip?.unique_id === c.unique_id ? 'border-blue-500 bg-white/10' : 'border-transparent hover:bg-white/5'" @click="librarySelectedClip = c">
+                        <div class="w-16 h-10 bg-black rounded overflow-hidden flex-shrink-0 border" :class="c.is_event_clip === 1 ? 'border-indigo-500' : 'border-transparent'"><img v-if="c.thumbnail" :src="c.thumbnail" class="w-full h-full object-cover"></div>
+                        <div class="flex-1 min-w-0">
+                            <div class="font-bold text-white text-xs truncate">{{ c.name }}</div>
+                            <div v-if="c.is_event_clip === 1" class="text-[9px] text-indigo-400 uppercase tracking-wider font-bold">Event Logic</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="flex-1 glass-panel p-6 flex flex-col min-h-0" v-if="librarySelectedClip">
+                <div class="flex justify-between items-start mb-6 flex-shrink-0">
+                    <div class="flex-1 mr-4"><label class="text-xs text-slate-400 uppercase font-bold block mb-1">Clip Name</label><div class="flex gap-2"><input v-model="librarySelectedClip.name" class="glass-input w-full p-2 rounded-lg"><button @click="saveClipDetails" class="glass-btn px-4 rounded-lg text-xs font-bold">Save</button></div></div>
+                    <div class="flex flex-col gap-2 items-end"><label class="text-xs text-slate-400 uppercase font-bold block">Actions</label><div class="flex gap-2"><button @click="captureThumbnail" class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-lg">📸 Set Thumb</button><button @click="deleteClip(librarySelectedClip.unique_id); librarySelectedClip=null" class="bg-red-500/20 hover:bg-red-500/40 text-red-400 px-4 py-2 rounded-lg text-sm border border-red-500/30">🗑️ Delete</button></div></div>
+                </div>
+                <div class="flex-1 bg-black/50 rounded-xl overflow-hidden relative border border-white/10 flex flex-col">
+                    <video ref="libraryPlayer" :src="librarySelectedClip.filepath" class="w-full h-full object-contain flex-1" controls></video>
+                    <div class="absolute bottom-4 left-0 w-full text-center pointer-events-none"><span class="bg-black/70 px-3 py-1 rounded-full text-xs text-slate-300">Pause video to capture thumbnail</span></div>
+                </div>
+            </div>
+            <div v-else class="flex-1 glass-panel flex items-center justify-center text-slate-500">Select a clip to edit details.</div>
+        </div>
+
+        <div v-if="view === 'logic'" class="flex-1 flex gap-6 p-4 overflow-hidden">
+            
+            <div v-if="isGraphMode" class="flex-1 flex flex-col glass-panel overflow-hidden relative">
+                <div class="absolute top-4 left-4 z-50 flex gap-2">
+                    <button @click="isGraphMode=false" class="glass-btn px-4 py-2 rounded-lg font-bold text-xs bg-black/80 backdrop-blur">← Timeline Editor</button>
+                    <div class="px-4 py-2 rounded-lg bg-blue-600/20 text-blue-300 text-xs font-bold border border-blue-500/30 backdrop-blur">Map: {{ getClipName(logicSourceId) }}</div>
+                    <button @click="saveNodePositions" class="glass-btn px-4 py-2 rounded-lg font-bold text-xs text-green-400 border-green-500/30 hover:bg-green-600/20 bg-black/80">💾 Save Map</button>
+                    <button @click="autoLayout" class="glass-btn px-4 py-2 rounded-lg font-bold text-xs text-yellow-400 border-yellow-500/30 hover:bg-yellow-600/20 bg-black/80">✨ Auto-Tree</button>
+                </div>
+                
+                <div class="node-graph-grid w-full h-full" @mousedown="startPan" @mousemove="onGraphMouseMove" @mouseup="endPan" @wheel="zoomGraph">
+                    <div class="transform-layer absolute top-0 left-0 w-full h-full origin-top-left" :style="{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }">
+                        
+                        <svg class="connections overflow-visible">
+                            <defs>
+                                <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+                                    <polygon points="0 0, 10 3.5, 0 7" fill="#f97316" />
+                                </marker>
+                            </defs>
+                            <g v-for="edge in displayedGraphEdges" :key="edge.id">
+                                <path :d="edge.path" class="connection-line" :class="{'is-return': edge.isReturn}" marker-end="url(#arrowhead)" />
+                            </g>
+                        </svg>
+
+                        <div v-for="edge in displayedGraphEdges" :key="'lbl-'+edge.id" 
+                             class="edge-label" 
+                             :style="{left: edge.midX + 'px', top: edge.midY + 'px'}">
+                            {{ edge.label }}
+                            <span v-if="edge.isReturn" class="text-red-400 ml-1">↩</span>
+                        </div>
+                        
+                        <div v-for="node in displayedGraphNodes" :key="node.id" 
+                             class="graph-node" 
+                             :class="{ 'is-source': node.unique_id === logicSourceId, 'is-target': node.unique_id !== logicSourceId }"
+                             :style="{ left: node.x + 'px', top: node.y + 'px' }"
+                             @mousedown.stop="startDragNode($event, node)"
+                             @dblclick="selectNode(node)">
+                            
+                            <img v-if="node.thumbnail" :src="node.thumbnail" class="node-thumb">
+                            <div v-else class="node-thumb flex items-center justify-center bg-slate-800 text-slate-500 text-xs">No Thumb</div>
+                            <div class="play-icon text-white">▶</div>
+
+                            <div class="node-footer">
+                                <div class="node-title">{{ node.name }}</div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div v-else class="flex-1 flex flex-col glass-panel overflow-hidden">
+                <div class="p-4 border-b border-white/5 flex gap-4 items-center flex-shrink-0">
+                    <button @click="openGraph" class="glass-btn px-4 py-2 rounded-lg font-bold text-xs bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/40">🔀 Open Graph View</button>
+                    <select v-model="logicSourceId" @change="loadLogicSource" class="glass-input rounded-lg px-3 py-2 text-sm flex-1"><option :value="null">-- Select Main Video --</option><optgroup label="Full"><option v-for="c in masterClips" :value="c.unique_id">{{ c.name.replace('FULL: ', '') }}</option></optgroup><optgroup label="Event Clips"><option v-for="c in eventClips" :value="c.unique_id">⚡ {{ c.name }}</option></optgroup><optgroup label="Clips"><option v-for="c in subClips" :value="c.unique_id">{{ c.name }}</option></optgroup></select>
+                    <div class="flex items-center gap-2"><span class="text-xs font-bold text-slate-400">Preview:</span><button @click="toggleTestMode" class="text-xs font-bold px-3 py-1 rounded transition" :class="isTestMode ? 'bg-green-600 text-white' : 'glass-input text-slate-400'">{{ isTestMode ? 'LIVE SIM' : 'EDITOR' }}</button></div>
+                </div>
+
+                <div class="px-4 py-3 bg-black/20 flex gap-4 items-center justify-between border-b border-white/5 flex-shrink-0" v-if="logicSourceId">
+                    <div class="flex gap-4 items-center flex-1">
+                        <span class="text-xs font-bold text-purple-400">🎵 Audio:</span>
+                        <select v-model="logicBgMusic" @change="playPreviewMusic(logicBgMusic)" class="glass-input text-xs p-2 rounded w-48"><option :value="null">-- No Music --</option><option v-for="a in audioFiles" :value="a.path">{{ a.name }}</option></select>
+                        <input type="file" ref="audioInput" class="hidden" accept="audio/*" @change="uploadAudio"><button @click="$refs.audioInput.click()" class="text-xs bg-white/10 hover:bg-white/20 px-2 py-1 rounded text-white">+ Upload</button>
+                        <label class="flex items-center gap-2 text-xs text-slate-400 cursor-pointer ml-2"><input type="checkbox" v-model="logicMuteVideo" class="accent-red-500"> Mute Video</label>
+                    </div>
+                    <button @click="saveLogicBlock" class="text-xs text-blue-400 hover:text-white border border-blue-500/30 px-3 py-1 rounded">Save Settings</button>
+                </div>
+                <audio ref="bgmPreview" loop></audio>
+
+                <div class="flex-1 relative bg-black/50 flex items-center justify-center overflow-hidden min-h-0">
+                    <video v-if="logicSourceClip" ref="logicPlayer" :src="logicSourceClip.filepath" @timeupdate="updateLogicProgress" class="w-full h-full object-contain" controls></video>
+                    <div v-else class="text-slate-600"><h3 class="text-xl font-bold">Select Scene</h3></div>
+                    
+                    <div v-if="showLogicOverlay" class="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col justify-end pb-10 z-10 animate-fade-in">
+                        <h2 class="text-center text-3xl font-bold text-white mb-6 drop-shadow-md">Make Your Choice</h2>
+                        <div class="flex flex-wrap gap-8 justify-center px-10">
+                            <div v-for="(opt, idx) in currentEditingBlock.choices" :key="idx" @click="handleOptionClick(opt)" class="choice-card-overlay glass-panel w-48 h-28 relative group overflow-hidden">
+                                <img v-if="getClipThumb(opt.toId)" :src="getClipThumb(opt.toId)" class="absolute inset-0 w-full h-full object-cover opacity-80 group-hover:opacity-100 transition duration-300">
+                                <div class="absolute bottom-0 left-0 w-full p-2 text-center font-bold text-sm tracking-wide bg-black/60 backdrop-blur-sm" :style="{color: opt.color}">{{ opt.label || 'Option '+(idx+1) }}</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div v-if="isTestMode && isPlayingSubClip" class="absolute top-4 right-4 z-50"><button @click="finishSubClip" class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-full font-bold shadow-lg flex items-center gap-2 text-sm border border-blue-400">⏭️ Skip to Return</button></div>
+                </div>
+
+                <div class="bg-black/30 p-4 border-t border-white/5 h-[300px] flex-shrink-0 overflow-y-auto">
+                    <div v-if="logicSourceId && !isTestMode">
+                        <div class="mb-4 glass-panel p-2"><div class="flex justify-between text-xs text-slate-400 mb-1"><span>TIMELINE (Zoom: {{ zoomLevel }}%)</span><span>{{ formatDuration(logicCurrentTime) }}</span></div><input type="range" min="100" max="500" v-model="zoomLevel" class="w-full mb-2 h-1 accent-slate-500"><div class="overflow-x-auto"><div class="timeline-container" :style="{width: zoomLevel + '%'}" @click="jumpTime"><div class="timeline-playhead" :style="{left: logicPlayheadPercent + '%'}"></div><div v-for="block in existingLogicBlocks" :key="block.id" class="marker-trigger" :style="{left: (block.triggerTime/logicSourceClip.duration*100) + '%'}" :title="block.choices.length + ' choices'"></div></div></div><div class="flex justify-center mt-2"><button @click="createNewBlockAtCurrentTime" class="glass-btn px-4 py-1 rounded text-xs font-bold">+ Add Choice at {{ formatDuration(logicCurrentTime) }}</button></div></div>
+                        <div v-if="currentEditingBlock" class="glass-panel p-4 animate-fade-in">
+                            <div class="flex justify-between items-center mb-4 border-b border-white/5 pb-2">
+                                <h3 class="font-bold text-white text-sm">Choices at <span class="text-blue-400">{{ formatDuration(currentEditingBlock.triggerTime) }}</span></h3>
+                                <div class="flex gap-4 items-center">
+                                    <button @click="deleteLogicBlock" class="text-red-500 text-xs hover:text-white px-2">Delete</button>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+                                <div v-for="(opt, idx) in currentEditingBlock.choices" :key="idx" class="bg-black/40 p-3 rounded border border-white/10">
+                                    <div class="flex gap-2 mb-2 items-center"><input type="color" v-model="opt.color" class="bg-transparent border-none h-6 w-6 cursor-pointer p-0"><input v-model="opt.label" class="glass-input w-full p-1 rounded text-xs" placeholder="Button Label"></div>
+                                    <div class="flex gap-2"><div class="w-10 h-8 bg-black rounded flex-shrink-0 relative overflow-hidden"><img v-if="getClipThumb(opt.toId)" :src="getClipThumb(opt.toId)" class="w-full h-full object-cover"></div><select v-model="opt.toId" class="glass-input flex-1 p-1 rounded text-[10px]"><option :value="null">Target...</option><optgroup label="Event Clips"><option v-for="c in eventClips" :value="c.unique_id">⚡ {{ c.name }}</option></optgroup><optgroup label="Standard Clips"><option v-for="c in subClips" :value="c.unique_id">{{ c.name }}</option></optgroup></select></div>
+                                    <div class="flex items-center gap-2 mt-2">
+                                        <label class="text-[9px] text-yellow-400 flex items-center gap-1 cursor-pointer"><input type="checkbox" v-model="opt.return"> Return</label>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-2 mt-2">
+                                        <div><label class="text-[9px] text-green-400 uppercase">Set Var</label><input v-model="opt.setVar" class="glass-input w-full p-1 rounded text-[10px]"></div>
+                                        <div><label class="text-[9px] text-red-400 uppercase">Req Var</label><input v-model="opt.reqVar" class="glass-input w-full p-1 rounded text-[10px]"></div>
+                                    </div>
+                                </div>
+                                <div class="flex items-center justify-center border border-white/10 rounded border-dashed cursor-pointer hover:border-blue-500 min-h-[120px]" @click="addOption" v-if="currentEditingBlock.choices.length < 4"><span class="text-2xl text-slate-600">+</span></div>
+                            </div>
+                            <div class="flex justify-end gap-2"><button @click="currentEditingBlock=null; showLogicOverlay=false" class="text-slate-400 text-xs px-4 py-2 hover:text-white">Cancel</button><button @click="saveLogicBlock" class="glass-btn px-6 py-2 rounded font-bold text-sm">Save All</button></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div v-if="!isGraphMode" class="w-72 glass-panel flex flex-col overflow-hidden">
+                <div class="p-4 border-b border-white/5 flex-shrink-0"><h3 class="font-bold text-white text-sm uppercase">Events</h3></div>
+                <div class="flex-1 overflow-y-auto p-3 space-y-2">
+                    <div v-for="block in existingLogicBlocks" :key="block.id" class="p-3 rounded-lg border border-white/5 hover:border-blue-500 cursor-pointer transition flex justify-between items-center group bg-black/20" @click="editBlock(block)">
+                        <div><div class="text-blue-400 font-bold font-mono text-sm group-hover:text-white">{{ formatDuration(block.triggerTime) }}</div><div class="text-[10px] text-slate-400">{{ block.choices.length }} Choices</div></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="view === 'stats'" class="flex-1 flex flex-col items-center justify-center p-6 overflow-y-auto">
+            <div class="glass-panel p-10 max-w-4xl w-full">
+                <h2 class="text-3xl font-bold text-white mb-6 text-center">Project Analytics</h2>
+                <div v-if="statsData.length === 0" class="text-center text-slate-500 py-10">No data collected yet. Play your published movie to generate stats!</div>
+                <div v-else class="space-y-4">
+                    <div v-for="(stat, idx) in statsData" :key="idx" class="bg-black/30 p-4 rounded-xl border border-white/5 flex items-center gap-4">
+                        <div class="text-2xl font-bold text-blue-500 w-12">#{{idx+1}}</div>
+                        <div class="flex-1">
+                            <div class="text-white font-bold text-lg">{{ stat.choice_label }}</div>
+                            <div class="w-full bg-slate-800 h-2 rounded-full mt-2 overflow-hidden"><div class="bg-blue-500 h-full" :style="{width: (stat.count / maxStatCount * 100) + '%'}"></div></div>
+                        </div>
+                        <div class="text-xl font-bold text-white">{{ stat.count }} <span class="text-xs text-slate-500">clicks</span></div>
+                    </div>
+                </div>
+                <div class="mt-6 flex gap-4 justify-center">
+                    <button @click="fetchStats" class="text-blue-400 hover:text-white text-sm">↻ Refresh Data</button>
+                    <button @click="resetStats" class="text-red-400 hover:text-white text-sm">🗑️ Reset Stats</button>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="view === 'publish'" class="flex-1 flex flex-col items-center justify-center p-6 overflow-y-auto">
+            <div class="glass-panel p-8 max-w-6xl w-full flex flex-col h-full">
+                <h2 class="text-3xl font-bold text-white mb-4 text-center flex-shrink-0">Final Build</h2>
+                
+                <div class="mb-4 flex justify-center gap-4 items-center bg-black/20 p-3 rounded-xl flex-shrink-0">
+                    <label class="text-sm font-bold text-slate-400">Theme Color:</label><input type="color" v-model="projectColor" @change="saveSettings" class="bg-transparent border-none h-8 w-8 cursor-pointer">
+                    <div class="flex-1 text-right"><input v-model="publishTitle" class="glass-input px-4 py-2 rounded-lg text-sm w-64" placeholder="Movie Title"></div>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-6 mb-4 flex-1 min-h-0">
+                    <div class="glass-panel p-4 flex flex-col h-full">
+                        <div class="flex justify-between items-center mb-2 flex-shrink-0">
+                            <h3 class="text-slate-400 text-xs font-bold uppercase">Interactive Scenes</h3>
+                        </div>
+                        <div class="flex-1 overflow-y-auto space-y-1 pr-2">
+                            <div v-if="filteredPublishClips.length === 0" class="text-slate-500 text-xs text-center py-4">No scenes match filter</div>
+                            <div v-for="c in filteredPublishClips" :key="c.unique_id" class="flex items-center gap-3 p-2 rounded-lg border border-white/5 hover:bg-white/5 cursor-pointer transition" :class="c.is_event_clip === 1 ? 'bg-indigo-900/10 border-indigo-500/30' : ''" @click="addToSequence(c)">
+                                <div class="w-10 h-6 rounded overflow-hidden flex-shrink-0 border" :class="c.is_event_clip === 1 ? 'border-indigo-500' : 'border-transparent'"><img :src="c.thumbnail" class="w-full h-full object-cover"></div>
+                                <div class="flex-1 min-w-0">
+                                    <div class="font-bold text-white text-xs truncate">{{ c.name }}</div>
+                                    <div v-if="c.is_event_clip === 1" class="text-[9px] text-indigo-400 font-bold tracking-wider">⚡ Event Logic</div>
+                                </div>
+                                <div class="text-green-400 text-lg">+</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="glass-panel p-4 flex flex-col h-full border border-blue-500/30">
+                        <h3 class="text-blue-400 text-xs font-bold uppercase mb-2 flex-shrink-0">Story Sequence</h3>
+                        <div v-if="storySequence.length === 0" class="flex-1 flex items-center justify-center text-slate-500 text-xs">Click scenes on the left to add them to the movie sequence.</div>
+                        <div v-else class="flex-1 overflow-y-auto space-y-1 pr-2">
+                            <div v-for="(item, idx) in storySequence" :key="idx" class="flex items-center gap-3 p-2 rounded-lg bg-blue-900/20 border border-blue-500/30">
+                                <div class="w-5 h-5 rounded-full bg-blue-500 text-white flex items-center justify-center text-[10px] font-bold flex-shrink-0">{{ idx + 1 }}</div>
+                                <div class="flex-1 text-xs text-white truncate min-w-0">{{ item.name }}</div>
+                                <div class="flex gap-1 flex-shrink-0"><button @click="moveSequence(idx, -1)" class="text-slate-400 hover:text-white px-1">▲</button><button @click="moveSequence(idx, 1)" class="text-slate-400 hover:text-white px-1">▼</button><button @click="removeFromSequence(idx)" class="text-red-400 hover:text-white px-2">✕</button></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="flex-shrink-0 flex gap-4 items-start">
+                    <div class="flex-1 flex flex-col gap-2">
+                         <div class="flex gap-2">
+                             <button @click="startPreview" class="glass-btn flex-1 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 py-3 rounded-xl font-bold text-lg mb-2 border border-indigo-500/30">▶ Preview Movie</button>
+                             <button @click="publishProject" class="glass-btn flex-1 bg-green-600/20 hover:bg-green-600/40 text-green-400 py-3 rounded-xl font-bold text-lg mb-2" :disabled="publishing || storySequence.length===0">{{ publishing ? 'Building...' : '🚀 Build & Publish Movie' }}</button>
+                         </div>
+                        <div v-if="publishUrl" class="p-3 bg-green-900/20 border border-green-500/30 rounded-xl text-center"><div class="text-green-400 font-bold mb-1">✅ Build Complete!</div><a :href="publishUrl" target="_blank" class="text-white underline hover:text-green-300">Open Movie</a></div>
+                    </div>
+                    
+                    <div class="w-64 glass-panel p-3 h-32 overflow-y-auto">
+                        <h4 class="text-xs font-bold text-slate-500 uppercase mb-2">Published History</h4>
+                        <div v-if="exportsList.length===0" class="text-[10px] text-slate-600">No builds yet.</div>
+                        <div v-for="exp in exportsList" :key="exp.name" class="flex justify-between items-center mb-1 group">
+                            <a :href="exp.url" target="_blank" class="text-xs text-blue-400 hover:text-white truncate flex-1">{{ exp.name }}</a>
+                            <button @click="deleteExport(exp.name)" class="text-[10px] text-red-500 opacity-0 group-hover:opacity-100 px-2">Del</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="previewMode" class="preview-overlay animate-fade-in" v-cloak>
+             <div class="absolute top-4 right-4 z-50 flex gap-4">
+                 <div class="bg-black/50 px-4 py-2 rounded-full text-xs text-slate-400 border border-white/10 backdrop-blur-md">Simulating: {{ publishTitle }}</div>
+                 <button @click="closePreview" class="bg-red-600/80 hover:bg-red-500 text-white font-bold py-2 px-6 rounded-full shadow-lg transition transform hover:scale-105 backdrop-blur-md">✕ Close Preview</button>
+             </div>
+             
+             <div class="flex-1 relative flex items-center justify-center bg-black overflow-hidden">
+                 <video ref="previewPlayer" class="max-w-full max-h-full object-contain" @timeupdate="onPreviewTimeUpdate" @ended="onPreviewEnded" playsinline webkit-playsinline></video>
+                 <audio ref="previewBgm" loop></audio>
+                 
+                 <div v-if="previewShowChoices" class="absolute inset-0 bg-black/70 backdrop-blur-sm flex flex-col justify-center items-center z-50 animate-fade-in">
+                     <h1 class="text-4xl font-bold mb-12 text-white drop-shadow-[0_0_15px_rgba(255,255,255,0.3)]">Make Your Choice</h1>
+                     <div class="flex flex-wrap gap-10 justify-center px-10">
+                         <div v-for="ch in previewCurrentChoices" @click="makePreviewChoice(ch)" class="preview-card w-72 h-44 md:w-96 md:h-56 group rounded-2xl border-2" :class="{locked: isPreviewLocked(ch)}" :style="{borderColor: ch.color || 'rgba(255,255,255,0.2)'}">
+                             <img :src="getClipThumb(ch.to)" class="absolute inset-0 w-full h-full object-cover opacity-80 group-hover:opacity-100 transition duration-500 scale-100 group-hover:scale-110">
+                             <div class="absolute bottom-0 left-0 w-full p-4 text-center font-bold text-xl tracking-wide bg-gradient-to-t from-black via-black/80 to-transparent pt-10" :style="{color: ch.color || '#fff'}">{{ch.label}}</div>
+                             <div v-if="isPreviewLocked(ch)" class="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm"><span class="text-5xl">🔒</span></div>
+                         </div>
+                     </div>
+                 </div>
+             </div>
+        </div>
+
+    </div> 
+
+    <transition name="toast"><div v-if="toast.show" class="fixed bottom-10 right-10 px-6 py-4 rounded-xl shadow-2xl z-50 flex items-center gap-3" :class="toast.type === 'error' ? 'bg-red-600' : 'bg-green-600'"><span class="text-2xl">{{ toast.type === 'error' ? '⚠️' : '✅' }}</span><div class="text-white font-bold">{{ toast.msg }}</div></div></transition>
+
+</div>
+
+<script>
+    const { createApp } = Vue;
+    createApp({
+        data() {
+            return {
+                view: 'projects', projects: [], currentProject: null,
+                videos: [], clips: [], edges: [], audioFiles: [], uploading: false, selectedFile: null, selectedVidId: null, videoUrl: '', currentVidDuration: 0, currentTime: 0, clipStart: 0, clipEnd: 0, clipName: '', clipFilter: 'none', clipSpeed: 1, clipVolume: 1,
+                // Event Clips
+                eventChoices: [{label:'', toId:null, color:'#ffffff', returnToMain:false, setVar:''}],
+                previewEventClip: null, showTestChoices: false, testChoices: [], testHistory: [], testIsReturning: false,
+                // EDIT MODE ADDITIONS
+                isEditingEvent: false, editingEventId: null,
+
+                // Logic
+                logicSourceId: null, logicCurrentTime: 0, showLogicOverlay: false, currentEditingBlock: null, isTestMode: false, historyStack: [], zoomLevel: 100, isPlayingSubClip: false,
+                logicBgMusic: null, logicMuteVideo: false,
+                isGraphMode: false,
+                // Graph Editor State
+                pan: {x: 50, y: 50}, zoom: 1, isDraggingNode: false, dragNodeId: null, lastMouse: {x:0, y:0},
+                // Library
+                librarySelectedClip: null,
+                // Stats & Publish
+                statsData: [], publishTitle: 'My Movie', storySequence: [], publishing: false, publishUrl: '', projectColor: '#3b82f6', 
+                exportsList: [], 
+                // Full Preview Engine
+                previewMode: false, previewPlaylistIndex: 0, previewClip: null, previewActiveBlocks: [], previewCurrentOptions: null, previewShowChoices: false, previewHistoryStack: [], previewGameState: {}, previewIsPlayingSubClip: false,
+                toast: { show: false, msg: '', type: 'success' }
+            }
+        },
+        computed: {
+            playheadPercent() { return this.currentVidDuration ? (this.currentTime / this.currentVidDuration) * 100 : 0; },
+            startPercent() { return this.currentVidDuration ? (this.clipStart / this.currentVidDuration) * 100 : 0; },
+            endPercent() { return this.currentVidDuration ? (this.clipEnd / this.currentVidDuration) * 100 : 0; },
+            logicSourceClip() { return this.clips.find(c => c.unique_id === this.logicSourceId); },
+            logicPlayheadPercent() { return (this.logicSourceClip && this.logicSourceClip.duration) ? (this.logicCurrentTime / this.logicSourceClip.duration) * 100 : 0; },
+            
+            // Clip Filters
+            masterClips() { return this.clips.filter(c => c.name.startsWith('FULL:')); },
+            eventClips() { return this.clips.filter(c => c.is_event_clip === 1); },
+            subClips() { return this.clips.filter(c => !c.name.startsWith('FULL:') && c.is_event_clip !== 1); },
+            
+            existingLogicBlocks() {
+                if(!this.logicSourceId) return [];
+                const myEdges = this.edges.filter(e => e.from_id === this.logicSourceId);
+                const blocks = {};
+                myEdges.forEach(e => {
+                    const id = e.logic_id || 'legacy_'+e.trigger_time;
+                    if(!blocks[id]) blocks[id] = { id, triggerTime: e.trigger_time, choices: [] };
+                    blocks[id].choices.push({ toId: e.to_id, label: e.label, color: e.text_color, return: !!e.return_to_main, setVar: e.set_var, reqVar: e.req_var });
+                });
+                return Object.values(blocks).sort((a,b) => a.triggerTime - b.triggerTime);
+            },
+            
+            // --- CONTEXTUAL GRAPH VISUALIZATION ---
+            displayedGraphNodes() {
+                if(!this.logicSourceId) return [];
+                const childrenIds = this.edges.filter(e => e.from_id === this.logicSourceId).map(e => e.to_id);
+                const allIds = [this.logicSourceId, ...childrenIds];
+                return this.clips.filter(c => allIds.includes(c.unique_id));
+            },
+            
+            displayedGraphEdges() {
+                if(!this.logicSourceId) return [];
+                const nodes = this.displayedGraphNodes;
+                const nodeIds = new Set(nodes.map(n => n.unique_id));
+                
+                return this.edges
+                    .filter(e => e.from_id === this.logicSourceId && nodeIds.has(e.to_id))
+                    .map(e => {
+                        const fromNode = nodes.find(c => c.unique_id === e.from_id);
+                        const toNode = nodes.find(c => c.unique_id === e.to_id);
+                        if(!fromNode || !toNode) return null;
+                        
+                        // TREE LAYOUT: Root is Left, Children Right
+                        const startX = (fromNode.x || 0) + 220; // Width of card
+                        const startY = (fromNode.y || 0) + 65;  // Half height of card
+                        const endX = (toNode.x || 0);
+                        const endY = (toNode.y || 0) + 65;
+                        
+                        const dist = Math.abs(endX - startX) * 0.5;
+                        const path = `M ${startX} ${startY} C ${startX + dist} ${startY}, ${endX - dist} ${endY}, ${endX} ${endY}`;
+                        
+                        const midX = (startX + endX) / 2;
+                        const midY = (startY + endY) / 2;
+
+                        return { 
+                            id: e.id, path, label: e.label, isReturn: !!e.return_to_main, midX, midY 
+                        };
+                    }).filter(x => x);
+            },
+
+            filteredPublishClips() { 
+                return this.clips.filter(c => c.is_event_clip === 1 || this.edges.some(e => e.from_id === c.unique_id));
+            },
+            maxStatCount() { return Math.max(...this.statsData.map(s => s.count), 1); },
+            previewCurrentChoices(){ return this.previewCurrentOptions ? this.previewCurrentOptions.choices : []; }
+        },
+        mounted() { this.fetchProjects(); window.addEventListener('keydown', this.handleKeys); },
+        beforeUnmount() { window.removeEventListener('keydown', this.handleKeys); },
+        methods: {
+            navClass(v) { return `px-4 py-2 rounded-lg font-bold transition text-sm ${this.view === v ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:text-white hover:bg-white/10'}` },
+            formatDuration(s) { if(!s) return '0s'; const m = Math.floor(s/60); const sec = Math.floor(s%60); return `${m}:${sec.toString().padStart(2,'0')}`; },
+            handleKeys(e) { 
+                if((this.view==='clipper' || this.view==='library' || this.view==='eventCreator') && e.code==='Space') { 
+                    e.preventDefault(); 
+                    const v = (this.view==='clipper') ? this.$refs.video : (this.view==='eventCreator' ? (this.previewEventClip ? this.$refs.testPlayer : this.$refs.eventVideo) : this.$refs.libraryPlayer); 
+                    if(v) v.paused?v.play():v.pause(); 
+                } 
+            },
+            showToast(msg, type='success') { this.toast={show:true, msg, type}; setTimeout(()=>this.toast.show=false, 3000); },
+
+            async fetchProjects() { const res = await fetch('/api/projects'); this.projects = await res.json(); },
+            async createProject() { const title = prompt("Project Title:"); if(title) { await fetch('/api/projects', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({title})}); this.fetchProjects(); } },
+            selectProject(p) { this.currentProject = p; this.projectColor = p.theme_color || '#3b82f6'; this.view = 'upload'; this.refreshData(); },
+            async saveSettings() { await fetch('/api/project/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:this.currentProject.id, color:this.projectColor})}); },
+            async refreshData() { 
+                const pid = this.currentProject.id; 
+                const vRes = await fetch(`/api/videos?projectId=${pid}`); this.videos = await vRes.json(); 
+                const sRes = await fetch(`/api/story?projectId=${pid}`); const d = await sRes.json(); this.clips = d.clips; this.edges = d.edges; 
+                const aRes = await fetch('/api/audio'); this.audioFiles = await aRes.json(); 
+            },
+
+            handleFileSelect(e) { this.selectedFile = e.target.files[0]; },
+            async uploadVideo() { if(!this.selectedFile) return; this.uploading = true; const fd = new FormData(); fd.append('file', this.selectedFile); fd.append('projectId', this.currentProject.id); try { await fetch('/api/upload', {method:'POST', body:fd}); this.showToast("Imported!"); this.refreshData(); this.view='clipper'; } catch(e){ this.showToast("Error", 'error'); } this.uploading = false; },
+            
+            async uploadAudio(e) {
+                const file = e.target.files[0]; if (!file) return;
+                const fd = new FormData(); fd.append('file', file); fd.append('projectId', this.currentProject.id);
+                try {
+                    const res = await fetch('/api/upload', {method: 'POST', body: fd}); const data = await res.json();
+                    if(data.success && data.type === 'audio') { this.showToast("Audio Uploaded!"); await this.refreshData(); this.logicBgMusic = data.path; this.playPreviewMusic(data.path); }
+                } catch(err) { this.showToast("Upload Error", 'error'); }
+            },
+
+            async deleteVideo() { if(confirm("Delete video?")) { await fetch('/api/delete_video', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:this.selectedVidId})}); this.selectedVidId=null; this.videoUrl=''; this.refreshData(); this.showToast("Deleted"); } },
+            async deleteClip(uid) { if(confirm("Delete clip?")) { await fetch('/api/delete_clip', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({unique_id:uid})}); this.refreshData(); } },
+
+            loadVideo() { const v = this.videos.find(x => x.id === this.selectedVidId); if(v) { this.videoUrl = v.filepath; this.currentVidDuration = v.duration; } },
+            updateProgress() { if(this.$refs.video) this.currentTime = this.$refs.video.currentTime; },
+            updateEventProgress() { if(this.$refs.eventVideo) this.currentTime = this.$refs.eventVideo.currentTime; },
+            
+            seekTimeline(e) { if(!this.currentVidDuration) return; const rect = e.target.getBoundingClientRect(); this.$refs.video.currentTime = ((e.clientX - rect.left)/rect.width)*this.currentVidDuration; },
+            seekEventTimeline(e) { if(!this.currentVidDuration) return; const rect = e.target.getBoundingClientRect(); this.$refs.eventVideo.currentTime = ((e.clientX - rect.left)/rect.width)*this.currentVidDuration; },
+
+            setStart() { const v = this.view==='clipper' ? this.$refs.video : this.$refs.eventVideo; this.clipStart = v.currentTime; }, 
+            setEnd() { const v = this.view==='clipper' ? this.$refs.video : this.$refs.eventVideo; this.clipEnd = v.currentTime; },
+            nudge(t, a) { const v = this.view==='clipper' ? this.$refs.video : this.$refs.eventVideo; if(t==='start') this.clipStart+=a; else this.clipEnd+=a; v.currentTime = t==='start'?this.clipStart:this.clipEnd; },
+            
+            async cutClip() { if(!this.clipName) return alert("Name needed"); try { await fetch('/api/clip', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ projectId: this.currentProject.id, sourceId: this.selectedVidId, start: this.clipStart, end: this.clipEnd, name: this.clipName, filter: this.clipFilter, speed: this.clipSpeed, volume: this.clipVolume })}); this.showToast("Clip Created!"); this.refreshData(); } catch(e) { this.showToast("Error", 'error'); } },
+
+            // --- EVENT CREATOR METHODS ---
+            async createEventClip() {
+                if(!this.clipName) return alert("Name needed");
+                try {
+                    await fetch('/api/create_event_clip', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            projectId: this.currentProject.id,
+                            sourceId: this.selectedVidId,
+                            start: this.clipStart,
+                            end: this.clipEnd,
+                            name: this.clipName,
+                            choices: this.eventChoices
+                        })
+                    });
+                    this.showToast("⚡ Event Created!");
+                    await this.refreshData(); 
+                    this.eventChoices = [{label:'', toId:null, color:'#ffffff', returnToMain:false, setVar:''}]; 
+                } catch(e) { this.showToast("Error", 'error'); }
+            },
+            
+            // --- NEW: EDIT EVENT METHODS ---
+            editEvent(c) {
+                this.isEditingEvent = true;
+                this.editingEventId = c.unique_id;
+                this.clipName = c.name;
+                // Load video just for visual context, even if we can't edit it
+                this.videoUrl = c.filepath; 
+                this.currentVidDuration = c.duration;
+                // Load Choices
+                const currentEdges = this.edges.filter(e => e.from_id === c.unique_id);
+                this.eventChoices = currentEdges.map(e => ({
+                    label: e.label,
+                    toId: e.to_id,
+                    color: e.text_color || '#ffffff',
+                    returnToMain: !!e.return_to_main,
+                    setVar: e.set_var,
+                    reqVar: e.req_var
+                }));
+                if (this.eventChoices.length === 0) this.eventChoices = [{label:'', toId:null, color:'#ffffff', returnToMain:false, setVar:''}];
+            },
+            cancelEventEdit() {
+                this.isEditingEvent = false;
+                this.editingEventId = null;
+                this.clipName = '';
+                this.eventChoices = [{label:'', toId:null, color:'#ffffff', returnToMain:false, setVar:''}];
+                this.videoUrl = '';
+            },
+            async saveEventChanges() {
+                if(!this.editingEventId) return;
+                try {
+                    await fetch('/api/update_event_logic', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ projectId: this.currentProject.id, clipId: this.editingEventId, name: this.clipName, choices: this.eventChoices })
+                    });
+                    this.showToast("Events Updated!");
+                    await this.refreshData();
+                    this.cancelEventEdit();
+                } catch(e) { this.showToast("Error", 'error'); }
+            },
+
+            copyToClipboard(text) { navigator.clipboard.writeText(text); this.showToast("ID Copied!"); },
+            testEventClip(clip) {
+                this.previewEventClip = clip;
+                this.testHistory = [];
+                this.showTestChoices = false;
+                this.testChoices = this.edges.filter(e => e.from_id === clip.unique_id);
+                this.testIsReturning = false;
+            },
+            closeTestEvent() { this.previewEventClip = null; this.testHistory = []; },
+            checkTestLogic() {
+                if(!this.previewEventClip || this.showTestChoices || !this.$refs.testPlayer) return;
+                // If within 0.3s of end AND we have logic for this current clip ID
+                if(this.$refs.testPlayer.currentTime >= this.$refs.testPlayer.duration - 0.3) {
+                    const currentEdges = this.edges.filter(e => e.from_id === this.previewEventClip.unique_id);
+                    if(currentEdges.length > 0) {
+                        this.$refs.testPlayer.pause();
+                        this.testChoices = currentEdges;
+                        this.showTestChoices = true;
+                    }
+                }
+            },
+            simulateChoice(opt) {
+                const nextClip = this.clips.find(c => c.unique_id === opt.to_id);
+                if(nextClip) {
+                    if(opt.return_to_main === 1) {
+                        this.testHistory.push(this.previewEventClip); // Push current clip to stack
+                        this.testIsReturning = true;
+                    } else {
+                        this.testIsReturning = false;
+                    }
+                    this.previewEventClip = nextClip;
+                    this.showTestChoices = false;
+                } else {
+                    this.showToast("Target clip not found!", "error");
+                }
+            },
+            handleTestEnd() {
+                if(this.testHistory.length > 0) {
+                    // Return logic
+                    const prev = this.testHistory.pop();
+                    this.previewEventClip = prev;
+                    this.testIsReturning = false;
+                    this.showTestChoices = false; 
+                }
+            },
+
+            async saveClipDetails() { if(!this.librarySelectedClip) return; await fetch('/api/clip/update', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:this.librarySelectedClip.unique_id, name:this.librarySelectedClip.name}) }); this.showToast("Updated!"); },
+            async captureThumbnail() { if(!this.librarySelectedClip || !this.$refs.libraryPlayer) return; const time = this.$refs.libraryPlayer.currentTime; const res = await fetch('/api/clip/thumbnail', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:this.librarySelectedClip.unique_id, time}) }); const data = await res.json(); if(data.success) { this.librarySelectedClip.thumbnail = data.thumbnail + '?t=' + Date.now(); this.showToast("Thumbnail Set!"); } },
+
+            loadLogicSource() { 
+                this.showLogicOverlay = false; this.currentEditingBlock = null; 
+                if(this.logicSourceId) { 
+                    const c = this.logicSourceClip; 
+                    if(c) { this.logicBgMusic = c.bg_music; this.logicMuteVideo = !!c.mute_audio; this.$nextTick(() => { if(this.$refs.logicPlayer) this.$refs.logicPlayer.muted = this.logicMuteVideo; this.playPreviewMusic(this.logicBgMusic); }); }
+                }
+            },
+            toggleTestMode() { this.isTestMode = !this.isTestMode; this.showLogicOverlay = false; this.currentEditingBlock = null; },
+            playPreviewMusic(url) { const a = this.$refs.bgmPreview; if(!a) return; if(url) { a.src = url; a.volume = 0.3; a.play().catch(e=>{}); } else { a.pause(); } },
+
+            updateLogicProgress() { 
+                const v = this.$refs.logicPlayer; if(!v) return; this.logicCurrentTime = v.currentTime;
+                if(this.isPlayingSubClip) return;
+                if(this.isTestMode && !this.showLogicOverlay) { const block = this.existingLogicBlocks.find(b => v.currentTime >= b.triggerTime && v.currentTime < b.triggerTime + 0.5); if(block) { v.pause(); this.currentEditingBlock = block; this.showLogicOverlay = true; } }
+                else if(!this.isTestMode && this.currentEditingBlock && Math.abs(this.logicCurrentTime - this.currentEditingBlock.triggerTime) < 0.5) { this.showLogicOverlay = true; } 
+                else if (!this.isTestMode) { this.showLogicOverlay = false; }
+            },
+            handleOptionClick(opt) { 
+                if(this.isTestMode) { 
+                    const targetClip = this.clips.find(c => c.unique_id === opt.toId); 
+                    if(targetClip) { 
+                        if(opt.return) { this.historyStack.push({ time: this.$refs.logicPlayer.currentTime + 0.5, src: this.$refs.logicPlayer.src }); } 
+                        this.$refs.logicPlayer.src = targetClip.filepath; this.$refs.logicPlayer.muted = !!targetClip.mute_audio; this.$refs.logicPlayer.play(); this.playPreviewMusic(targetClip.bg_music);
+                        this.showLogicOverlay = false; this.isPlayingSubClip = true; 
+                        if(opt.return) { this.$refs.logicPlayer.onended = () => { this.finishSubClip(); }; } 
+                    } 
+                } 
+            },
+            finishSubClip() {
+                if(this.historyStack.length > 0) { const state = this.historyStack.pop(); this.$refs.logicPlayer.src = state.src; this.$refs.logicPlayer.currentTime = state.time; this.$refs.logicPlayer.play(); }
+                this.$refs.logicPlayer.onended = null; this.isPlayingSubClip = false;
+                if(this.logicSourceClip) { this.$refs.logicPlayer.muted = !!this.logicSourceClip.mute_audio; this.playPreviewMusic(this.logicSourceClip.bg_music); }
+            },
+            jumpTime(e) { if(!this.logicSourceClip) return; const rect = e.target.getBoundingClientRect(); this.$refs.logicPlayer.currentTime = ((e.clientX - rect.left)/rect.width)*this.logicSourceClip.duration; },
+            createNewBlockAtCurrentTime() { this.$refs.logicPlayer.pause(); this.currentEditingBlock = { id: null, triggerTime: this.$refs.logicPlayer.currentTime, choices: [{toId:null, label:'', color:'#ffffff', return:false, setVar:'', reqVar:''}, {toId:null, label:'', color:'#ffffff', return:false, setVar:'', reqVar:''}] }; this.showLogicOverlay = true; },
+            editBlock(block) { this.$refs.logicPlayer.pause(); this.$refs.logicPlayer.currentTime = block.triggerTime; this.currentEditingBlock = JSON.parse(JSON.stringify(block)); this.showLogicOverlay = true; },
+            addOption() { if(this.currentEditingBlock.choices.length<4) this.currentEditingBlock.choices.push({toId:null, label:'', color:'#ffffff', return:false}); },
+            
+            async fetchStats() { this.view = 'stats'; if(!this.currentProject) return; const res = await fetch(`/api/analytics/${this.currentProject.id}`); this.statsData = await res.json(); },
+            async resetStats() {
+                if(!confirm("Are you sure you want to reset all click statistics for this project? This cannot be undone.")) return;
+                try {
+                    await fetch('/api/analytics/reset', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ projectId: this.currentProject.id })
+                    });
+                    this.showToast("Stats Reset!");
+                    this.fetchStats();
+                } catch(e) { this.showToast("Error", 'error'); }
+            },
+            
+            addToSequence(clip) { this.storySequence.push({ id: clip.unique_id, name: clip.name, startTime: 0 }); },
+            removeFromSequence(idx) { this.storySequence.splice(idx, 1); },
+            moveSequence(idx, dir) { if(idx + dir < 0 || idx + dir >= this.storySequence.length) return; const temp = this.storySequence[idx]; this.storySequence[idx] = this.storySequence[idx + dir]; this.storySequence[idx + dir] = temp; },
+
+            async fetchExports() { const res = await fetch('/api/exports'); this.exportsList = await res.json(); },
+            async deleteExport(name) { if(confirm("Delete build?")) { await fetch('/api/delete_export', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})}); this.fetchExports(); } },
+
+            async saveLogicBlock() {
+                if(!this.logicSourceId) return;
+                try { await fetch('/api/save_logic_block', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ projectId: this.currentProject.id, fromId: this.logicSourceId, logicId: this.currentEditingBlock.id, triggerTime: this.currentEditingBlock.triggerTime, returnToMain: this.currentEditingBlock.returnToMain, choices: this.currentEditingBlock.choices, bgMusic: this.logicBgMusic, muteAudio: this.logicMuteVideo }) }); this.showToast("Saved!"); await this.refreshData(); this.currentEditingBlock = null; this.showLogicOverlay = false; } catch(e) { this.showToast("Error", 'error'); }
+            },
+            async deleteLogicBlock() { if(!confirm("Delete?")) return; try { await fetch('/api/delete_logic_block', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ logicId: this.currentEditingBlock.id, fromId: this.logicSourceId, triggerTime: this.currentEditingBlock.triggerTime }) }); this.showToast("Deleted"); await this.refreshData(); this.currentEditingBlock = null; this.showLogicOverlay = false; } catch(e) { this.showToast("Error", 'error'); } },
+            getClipThumb(id) { const c = this.clips.find(x => x.unique_id === id); return c ? c.thumbnail : ''; },
+            async publishProject() { if(this.storySequence.length === 0) return alert("Please add scenes to the sequence."); this.publishing = true; try { const res = await fetch('/api/publish', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ projectId: this.currentProject.id, title:this.publishTitle, sequence: this.storySequence }) }); const data = await res.json(); this.publishUrl = data.url; this.showToast("Build Complete!"); this.fetchExports(); } catch(e) { this.showToast("Build Failed", 'error'); } this.publishing = false; },
+
+            // --- PREVIEW ENGINE (Added Logic) ---
+            async startPreview() {
+                if(this.storySequence.length === 0) return alert("Please add sequence items first.");
+                await this.refreshData(); // Ensure logic edges are loaded
+                this.previewMode = true;
+                this.previewPlaylistIndex = 0;
+                this.previewHistoryStack = [];
+                this.previewIsPlayingSubClip = false;
+                this.loadPreviewClip(this.storySequence[0].id);
+            },
+            closePreview() {
+                this.previewMode = false;
+                if(this.$refs.previewPlayer) this.$refs.previewPlayer.pause();
+                if(this.$refs.previewBgm) this.$refs.previewBgm.pause();
+            },
+            loadPreviewClip(id, forceTime=0) {
+                const nextClip = this.clips.find(c => c.unique_id === id); 
+                if(!nextClip) return;
+                
+                this.previewClip = nextClip;
+                this.previewShowChoices = false;
+                
+                // Construct logic blocks similar to server-side publish logic
+                const relevantEdges = this.edges.filter(e => e.from_id === id);
+                const blocks = {};
+                relevantEdges.forEach(e => {
+                    const key = e.logic_id || e.trigger_time; // Group by logic ID
+                    if(!blocks[key]) blocks[key] = { 
+                        id: key, 
+                        time: e.trigger_time, 
+                        // return: !!e.return_to_main, // Using Block-Level Return as per stable logic
+                        choices: [] 
+                    };
+                    blocks[key].choices.push({ to: e.to_id, label: e.label, color: e.text_color, setVar: e.set_var, reqVar: e.req_var, return: !!e.return_to_main });
+                });
+                this.previewActiveBlocks = Object.values(blocks).sort((a,b) => a.time - b.time);
+
+                if(forceTime > 0) this.previewActiveBlocks = this.previewActiveBlocks.filter(b => b.time > forceTime);
+
+                this.$nextTick(() => {
+                    const v = this.$refs.previewPlayer;
+                    if(!v) return;
+                    v.src = nextClip.filepath;
+                    v.currentTime = forceTime;
+                    v.muted = !!nextClip.mute_audio;
+                    v.play();
+                    
+                    // BGM
+                    const a = this.$refs.previewBgm;
+                    if(nextClip.bg_music){
+                        if(!a.src.includes(nextClip.bg_music)){ a.src=nextClip.bg_music; a.volume=0.3; a.play().catch(e=>{}); }
+                    } else { a.pause(); }
+                });
+            },
+            onPreviewTimeUpdate() {
+                if(this.previewShowChoices || !this.previewActiveBlocks.length || this.previewIsPlayingSubClip) return;
+                const v = this.$refs.previewPlayer;
+                if(v.currentTime >= this.previewActiveBlocks[0].time && v.currentTime < this.previewActiveBlocks[0].time + 1.0) {
+                    v.pause();
+                    this.previewCurrentOptions = this.previewActiveBlocks.shift();
+                    this.previewShowChoices = true;
+                }
+            },
+            makePreviewChoice(choice) {
+                if(this.isPreviewLocked(choice)) return;
+                if(choice.setVar) this.previewGameState[choice.setVar] = true;
+                
+                const targetClip = this.clips.find(c => c.unique_id === choice.to);
+                if(targetClip) {
+                    // Logic from stable server.js:
+                    if(choice.return) {
+                        if (this.previewClip.is_event_clip === 1) {
+                            // EVENT CLIP LOGIC: Return to START (0)
+                            this.previewHistoryStack.push({
+                                clipId: this.previewClip.unique_id, 
+                                time: 0, 
+                                remainingBlocks: [...this.previewActiveBlocks]
+                            });
+                        } else {
+                            // STANDARD LOGIC CLIP: Resume from TRIGGER POINT (+0.1)
+                            const returnTime = this.$refs.previewPlayer.currentTime + 0.1;
+                            this.previewHistoryStack.push({
+                                clipId: this.previewClip.unique_id, 
+                                time: returnTime, 
+                                remainingBlocks: [...this.previewActiveBlocks]
+                            });
+                        }
+                        this.previewIsPlayingSubClip = true;
+                    } 
+                    this.loadPreviewClip(choice.to, 0);
+                }
+            },
+            onPreviewEnded() {
+                if(this.previewShowChoices) return;
+                
+                // Case 1: Returning from a sub-clip choice
+                if(this.previewIsPlayingSubClip && this.previewHistoryStack.length > 0) {
+                    const prev = this.previewHistoryStack.pop();
+                    this.previewIsPlayingSubClip = false;
+                    this.previewActiveBlocks = prev.remainingBlocks || []; // Restore pending choices
+                    this.loadPreviewClip(prev.clipId, prev.time);
+                    return;
+                }
+                
+                // Case 2: Natural end of clip -> Next Playlist Item
+                this.previewPlaylistIndex++;
+                if(this.previewPlaylistIndex < this.storySequence.length) {
+                    this.loadPreviewClip(this.storySequence[this.previewPlaylistIndex].id);
+                } else {
+                    this.closePreview();
+                    this.showToast("End of Sequence");
+                }
+            },
+            isPreviewLocked(ch) { if(!ch.reqVar) return false; return !this.previewGameState[ch.reqVar]; },
+
+            // --- GRAPH EDITOR LOGIC ---
+            openGraph() {
+                if(!this.logicSourceId) return alert("Select a video first.");
+                this.isGraphMode = true;
+                this.pan = {x: 50, y: 50}; // Reset Pan
+                // Trigger auto-layout initially if positions look empty
+                const root = this.displayedGraphNodes.find(n => n.unique_id === this.logicSourceId);
+                if (root && (!root.x || root.x === 0)) this.autoLayout();
+            },
+            autoLayout() {
+                // TREE LAYOUT ALGORITHM (Left-to-Right)
+                const nodes = this.displayedGraphNodes;
+                if(nodes.length === 0) return;
+                
+                const root = nodes.find(n => n.unique_id === this.logicSourceId);
+                if(!root) return;
+
+                // Position Root
+                root.x = 100;
+                root.y = window.innerHeight / 3;
+
+                // Find Children
+                const edgeData = this.displayedGraphEdges;
+                const children = nodes.filter(n => n.unique_id !== this.logicSourceId);
+                
+                if (children.length > 0) {
+                    const startY = root.y - ((children.length - 1) * 160) / 2;
+                    
+                    children.forEach((child, index) => {
+                        child.x = 550; // Fixed distance to the right
+                        child.y = startY + (index * 170); // Spread vertically
+                    });
+                }
+                this.saveNodePositions();
+            },
+            startPan(e) { if(e.target.closest('.graph-node')) return; this.isPanning = true; this.lastMouse = {x: e.clientX, y: e.clientY}; },
+            onGraphMouseMove(e) {
+                if(this.isPanning) {
+                    this.pan.x += e.clientX - this.lastMouse.x;
+                    this.pan.y += e.clientY - this.lastMouse.y;
+                    this.lastMouse = {x: e.clientX, y: e.clientY};
+                }
+                if(this.isDraggingNode && this.dragNodeId) {
+                    const node = this.clips.find(c => c.id === this.dragNodeId);
+                    if(node) { node.x += e.movementX / this.zoom; node.y += e.movementY / this.zoom; }
+                }
+            },
+            endPan() { this.isPanning = false; this.isDraggingNode = false; this.dragNodeId = null; },
+            zoomGraph(e) { e.preventDefault(); this.zoom += e.deltaY * -0.001; this.zoom = Math.min(Math.max(0.5, this.zoom), 2); },
+            startDragNode(e, node) { this.isDraggingNode = true; this.dragNodeId = node.id; },
+            selectNode(node) { this.isGraphMode = false; this.logicSourceId = node.unique_id; this.loadLogicSource(); },
+            async saveNodePositions() {
+                const updates = this.clips.map(c => ({ id: c.unique_id, x: c.x, y: c.y }));
+                await fetch('/api/clip/positions', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ updates }) });
+                this.showToast("Layout Saved!");
+            },
+            getClipName(id) {
+                const c = this.clips.find(clip => clip.unique_id === id);
+                return c ? c.name : 'Unknown Clip';
+            },
+
+            addToSequence(clip) { this.storySequence.push({ id: clip.unique_id, name: clip.name }); },
+            removeFromSequence(idx) { this.storySequence.splice(idx, 1); },
+            async publishProject() { if(this.storySequence.length === 0) return alert("Sequence empty."); this.publishing = true; try { const res = await fetch('/api/publish', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ projectId: this.currentProject.id, title:this.publishTitle, sequence: this.storySequence }) }); const data = await res.json(); this.publishUrl = data.url; this.showToast("Build Complete!"); this.fetchExports(); } catch(e) { this.showToast("Build Failed", 'error'); } this.publishing = false; },
+            async fetchExports() { const res = await fetch('/api/exports'); this.exportsList = await res.json(); },
+            async fetchStats() { this.view = 'stats'; }
+        }
+    }).mount('#app');
+</script>
+</body>
+</html>
