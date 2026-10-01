@@ -93,8 +93,8 @@
               <button class="chip-btn chip-choice" @click="useAsChoice(clip)" :title="choiceButtonTitle" data-test="use-as-choice">&#9670; Choice</button>
               <button v-if="isSource(clip)" class="chip-btn" @click="openCutter(clip)" title="Cut a new clip from this video" data-test="cut-clip">&#9986; Cut</button>
               <span class="spacer"></span>
-              <button class="icon-btn" @click="renameClip(clip)" title="Rename" aria-label="Rename">&#9998;</button>
-              <button class="icon-btn danger" @click="deleteClip(clip)" title="Delete" aria-label="Delete">&#128465;</button>
+              <button class="icon-btn" @click="renameClip(clip)" title="Rename" aria-label="Rename"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+              <button class="icon-btn danger" @click="deleteClip(clip)" title="Delete" aria-label="Delete"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 7h15M10 11v6M14 11v6M6.5 7l.8 11.2A2 2 0 0 0 9.3 20h5.4a2 2 0 0 0 2-1.8L17.5 7M9 7V4.5h6V7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
             </div>
           </div>
         </div>
@@ -125,7 +125,7 @@
       <template v-if="selectedPoint">
         <div class="panel-head">
           <h2><span class="diamond"></span> Choice point</h2>
-          <button class="icon-btn danger" @click="removePoint(selectedPoint.id)" title="Delete choice" aria-label="Delete choice" data-test="delete-choice">&#128465;</button>
+          <button class="icon-btn danger" @click="removePoint(selectedPoint.id)" title="Delete choice" aria-label="Delete choice" data-test="delete-choice"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 7h15M10 11v6M14 11v6M6.5 7l.8 11.2A2 2 0 0 0 9.3 20h5.4a2 2 0 0 0 2-1.8L17.5 7M9 7V4.5h6V7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         </div>
         <div class="inspector-body">
           <div class="field">
@@ -208,7 +208,7 @@
       <template v-else-if="selectedItemEntry">
         <div class="panel-head">
           <h2>Clip on timeline</h2>
-          <button class="icon-btn danger" @click="removeItem(selectedItemEntry.item.id)" title="Remove from timeline" aria-label="Remove from timeline" data-test="remove-item">&#128465;</button>
+          <button class="icon-btn danger" @click="removeItem(selectedItemEntry.item.id)" title="Remove from timeline" aria-label="Remove from timeline" data-test="remove-item"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 7h15M10 11v6M14 11v6M6.5 7l.8 11.2A2 2 0 0 0 9.3 20h5.4a2 2 0 0 0 2-1.8L17.5 7M9 7V4.5h6V7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         </div>
         <div class="inspector-body">
           <div class="item-preview" :style="thumbStyle(selectedItemEntry.clip)"></div>
@@ -273,7 +273,7 @@
     <section class="timeline-panel">
       <div class="tl-toolbar">
         <button class="btn btn-icon" @click="togglePlay" :title="playerState === 'playing' || playerState === 'option' ? 'Pause' : 'Play'" data-test="tl-play">
-          <span v-if="playerState === 'playing' || playerState === 'option'">&#10073;&#10073;</span><span v-else>&#9654;</span>
+          <span v-if="playerState === 'playing' || playerState === 'option'"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></svg></span><span v-else><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg></span>
         </button>
         <span class="tl-time">{{ fmtPrecise(playhead) }} <span class="muted">/ {{ fmtPrecise(totalDuration) }}</span></span>
         <span class="tl-sep"></span>
@@ -386,7 +386,7 @@
           </div>
           <div class="cutter-controls">
             <button class="btn btn-icon" @click="toggleCutterPlay" :title="cutter.playing ? 'Pause' : 'Play'">
-              <span v-if="cutter.playing">&#10073;&#10073;</span><span v-else>&#9654;</span>
+              <span v-if="cutter.playing"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></svg></span><span v-else><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg></span>
             </button>
             <span class="tl-time">{{ fmtPrecise(cutter.current) }}</span>
             <span class="tl-sep"></span>

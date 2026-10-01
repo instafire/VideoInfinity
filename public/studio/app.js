@@ -1014,7 +1014,7 @@
                             u.progress = 1;
                             self.refreshLibrary().then(function () {
                                 self.binTab = 'videos';
-                                setTimeout(function () { self.dismissUpload(u); }, 4000);
+                                setTimeout(function () { self.dismissUpload(u); }, 2500);
                                 resolve(data);
                             });
                         } else {
