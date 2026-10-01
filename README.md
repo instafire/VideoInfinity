@@ -2,44 +2,36 @@
 
 > **Interactive Branching Video Studio & Narrative Gamebook Engine**
 
-Video Infinity is a full-featured, local-first interactive video creator and branching narrative editor. It empowers filmmakers, game developers, educators, and content creators to craft "Choose Your Own Adventure" style interactive movies (similar to Netflix's *Bandersnatch*) with visual logic graphs, timeline clipping, timed decision points, variable-based branching, and one-click standalone HTML player generation.
+Video Infinity is a local-first interactive movie maker. Upload videos, cut them into clips, lay them out on a timeline, drop **choice points** on top of the movie and export **one playable interactive movie** — similar to Netflix's *Bandersnatch*.
 
 ---
 
-## ✨ Features
+## ✨ Timeline Studio (default editor)
 
-- **Visual Story & Logic Editor**:
-  - Drag-and-drop node graph canvas for connecting scenes and story branches.
-  - Interactive choice buttons with customizable screen positioning, colors, and countdown timers.
-  - Variable tracking system (`set_var` / `req_var`) for unlocking conditional narrative pathways.
-  - Return-to-main logic loops for exploration and sub-quests.
-  - Game-over ending states and fail-safe saves.
+Open `http://localhost:3000` after starting the server.
 
-- **Timeline Video Trimmer & Clipper**:
-  - Precision video trimming and clip extraction powered by FFmpeg.
-  - Built-in video filters (Black & White, Sepia, Vivid).
-  - Playback speed control (0.5x, 1x, 1.5x, 2x) with pitch-corrected audio.
-  - Clip-level background music attachment and volume adjustments.
+1. **Upload** videos (drag files onto the Media panel or click *Upload video*). MP4, MOV, WebM, MKV and AVI are accepted; formats browsers can't play (AVI, HEVC, ProRes, 10-bit…) are converted to H.264/AAC on import.
+2. **Cut clips** with ✂ — set IN/OUT with the trim handles, the inputs or the `I` / `O` keys.
+3. **Build the main movie** — press *+ Timeline* or drag clips onto the *Main movie* track. Drag blocks to reorder them.
+4. **Add choices** — press `C`, double-click the *Choices* track or drag a clip onto it. Each option gets a label and a clip. Choice points are anchored to their clip, so they move with it when you reorder.
+5. **Preview** in the built-in player. It is the same player the export uses:
+   - the movie pauses when a choice appears,
+   - hovering an option plays a muted preview of its clip,
+   - clicking an option plays that clip,
+   - when the clip ends, **the main movie resumes from the exact frame where it paused**.
+6. **Export** — the main track is stitched into a single MP4 (normalized resolution, frame rate and audio, frame-accurate A/V sync), choice clips are encoded alongside it, and a self-contained player is written to `public/exports/<name>/`. Upload that folder to any static host or open `index.html` directly — no CDN needed.
 
-- **Event & Decision Creator**:
-  - Create interactive overlay choices triggered at exact timestamps.
-  - Support for multi-branch scenarios with fallback timeouts.
-  - Live in-editor preview player for testing choices before export.
+Optional per choice: a question for viewers, a countdown timer (continue the movie or auto-play a default option when it runs out) and a *Continue watching* skip button. The timeline autosaves and supports undo/redo (`Ctrl+Z` / `Ctrl+Shift+Z`).
 
-- **Choice Analytics & Heatmaps**:
-  - Track audience decisions and preference trends.
-  - Per-choice counters and route visualization.
-  - Reset and export analytics data.
+## 🧰 Classic tools
 
-- **Standalone HTML Player Publishing**:
-  - One-click build generator that bundles the entire interactive experience into a self-contained HTML runtime.
-  - Smart Skip functionality: automatically skip previously watched scenes.
-  - State persistence via `localStorage` (save & resume progress).
-  - Ready for hosting on static servers, Netlify, Vercel, GitHub Pages, or S3.
+The original tabbed studio is still available at `http://localhost:3000/classic`:
 
-- **Dual Architecture (Classic & Modular Timeline)**:
-  - **Classic Studio (`server.js`)**: Single-page Vue 3 interactive graph editor.
-  - **Timeline Studio (`server_new.js` / `public_new`)**: CapCut-style timeline-first authoring workflow with modular Vue components.
+- **Visual Story & Logic Editor**: node graph, variables (`set_var` / `req_var`), return-to-main loops, game-over endings.
+- **Clipper**: trimming with filters (Black & White, Sepia, Vivid), speed and volume.
+- **Event Creator**: event clips with end-of-clip choices.
+- **Analytics**: choice counts — exports made in the Timeline Studio report choices here too.
+- **Publish**: playlist-based standalone player with Smart Skip and save/resume.
 
 ---
 
@@ -50,8 +42,8 @@ Video Infinity is a full-featured, local-first interactive video creator and bra
 | **Backend** | [Node.js](https://nodejs.org/) & [Express 5](https://expressjs.com/) |
 | **Media Processing** | [Fluent-FFmpeg](https://github.com/fluent-ffmpeg/node-fluent-ffmpeg) with bundled static binaries |
 | **Database** | [SQLite](https://sqlite.org/) (`sqlite3` / `sqlite`) with auto-migrations |
-| **Frontend** | [Vue.js 3](https://vuejs.org/) (SPA) & [Tailwind CSS](https://tailwindcss.com/) |
-| **Storage** | Local-first file storage and zero-cloud dependency |
+| **Frontend** | [Vue.js 3](https://vuejs.org/) (served locally from `node_modules`), Tailwind CSS (classic tools) |
+| **Player** | Dependency-free JavaScript (`public/player/`) shared by the studio and exports |
 
 ---
 
@@ -59,37 +51,28 @@ Video Infinity is a full-featured, local-first interactive video creator and bra
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) (v18 or higher recommended)
-- [FFmpeg](https://ffmpeg.org/) (optional if using bundled `ffmpeg-static`)
+- [Node.js](https://nodejs.org/) v18 or newer
+- FFmpeg is bundled via `ffmpeg-static`
 
 ### Installation
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/instafire/VideoInfinity.git
-   cd VideoInfinity
-   ```
+```bash
+git clone https://github.com/instafire/VideoInfinity.git
+cd VideoInfinity
+npm install
+npm start
+```
 
-2. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+Then open `http://localhost:3000`.
 
-3. **Start the studio server:**
-   ```bash
-   npm start
-   ```
+`npm start`, `node server.js` and `npm run start:v2` all start the same server. Set `PORT` to use another port and `DB_FILE` to use another SQLite file.
 
-   To start the v2 modular timeline studio:
-   ```bash
-   npm run start:v2
-   ```
+### Tests
 
-4. **Launch the application:**
-   Open your browser and navigate to:
-   ```text
-   http://localhost:3000
-   ```
+```bash
+npm test          # API end-to-end test: upload -> cut -> timeline -> render -> verify export
+npm run test:e2e  # legacy Playwright UI test (requires @playwright/test)
+```
 
 ---
 
@@ -97,45 +80,51 @@ Video Infinity is a full-featured, local-first interactive video creator and bra
 
 ```text
 VideoInfinity/
-├── server.js              # Express application server and REST API
-├── server_new.js          # Enhanced v2 modular studio server
-├── public/                # Classic studio frontend
-│   └── index.html         # Vue 3 studio interface
-├── public_new/            # Modular timeline-first studio interface
-│   ├── index.html         # Studio v2 shell
-│   ├── app.js             # Runtime orchestrator
-│   ├── js/                # Modular Vue 3 components and views
-│   └── styles/            # UI styles
+├── server_new.js          # Express server: REST API, FFmpeg processing, publish/render engines
+├── server.js              # Entry point (loads server_new.js)
+├── public/
+│   ├── studio/            # Timeline Studio (index.html, app.js, styles.css)
+│   ├── player/            # Interactive player shared by the studio preview and exports
+│   └── index.html         # Classic studio (served at /classic)
+├── public_new/            # Earlier experimental v2 UI (not served)
+├── test/timeline.test.js  # API end-to-end test
 ├── docs/                  # Design specifications and architecture notes
-├── playwright.config.js   # End-to-end testing configuration
-├── phase1-e2e.js          # Automated end-to-end test suite
-├── package.json           # Project manifest and scripts
-└── README.md              # Project documentation
+└── package.json
 ```
 
 ---
 
 ## 🔌 API Endpoints Summary
 
-- `GET /api/projects` - List all projects
-- `POST /api/projects` - Create a new project
-- `POST /api/upload` - Upload video or audio assets
-- `GET /api/videos` - Retrieve uploaded source videos
-- `POST /api/clip` - Extract clip segment with filters and timing
-- `POST /api/create_event_clip` - Create decision-point event clip
-- `GET /api/story` - Retrieve story graph nodes and connections
-- `POST /api/save_logic_block` - Save choice connections and branch edges
-- `POST /api/publish` - Generate standalone interactive video bundle
-- `GET /api/analytics/:projectId` - Fetch viewer decision statistics
+**Timeline Studio**
+
+- `GET /api/timeline?projectId=` — load the project's timeline
+- `POST /api/timeline` — save `{ projectId, timeline: { items, choicePoints } }`
+- `POST /api/timeline/render` — start an export `{ projectId, title, resolution }` → `{ job }`
+- `GET /api/render_jobs/:id` — export progress (`queued` → `rendering` → `done` with `url`)
+
+**Media & projects**
+
+- `GET /api/projects`, `POST /api/projects` — list / create projects
+- `POST /api/upload` — upload video, audio or image (returns `videoId` and `clipId` for videos)
+- `GET /api/videos` — uploaded source videos
+- `POST /api/clip` — cut a clip `{ projectId, sourceId, start, end, name }`
+- `POST /api/clip/update` — rename / update clip metadata (only the fields sent are changed)
+- `POST /api/delete_clip`, `POST /api/delete_video`
+
+**Classic tools**
+
+- `GET /api/story`, `POST /api/save_logic_block`, `POST /api/create_event_clip`
+- `POST /api/publish` — playlist-based standalone player
+- `GET /api/analytics/:projectId`, `POST /api/analytics/track`
 
 ---
 
 ## 🔒 Privacy & Local-First Philosophy
 
-Video Infinity is built with privacy as a fundamental priority:
-- All video rendering, clipping, and database operations happen strictly on your local machine.
-- No telemetry, analytics, or media files are sent to external servers or third-party cloud services.
-- Media directories (`videos/`, `clips/`, `thumbnails/`, `exports/`) and local databases are excluded from version control by default.
+- All video processing, clipping, rendering and database operations happen on your machine.
+- The Timeline Studio and its exports load no third-party scripts.
+- Media directories (`videos/`, `clips/`, `thumbnails/`, `exports/`) and local databases are excluded from version control.
 
 ---
 

@@ -4,82 +4,49 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**VideoStudio (v20.12 Optimized)** is an interactive video studio application for creating branching/choose-your-own-adventure style videos (similar to Netflix's "Bandersnatch"). This is a merged and optimized version combining features from both the original and legacy versions.
+**Video Infinity** is a local-first interactive movie maker for branching / choose-your-own-adventure videos (similar to Netflix's "Bandersnatch").
 
 ## Commands
 
 ```bash
-# Install dependencies
 npm install
-
-# Start the development server
-node server.js
+npm start        # same as `node server.js` / `npm run start:v2`; serves http://localhost:3000
+npm test         # API end-to-end test (test/timeline.test.js), no browser needed
 ```
 
-The server runs on port 3000 by default.
-
-## Features
-
-- **Project Management**: Create and manage multiple interactive video projects with custom themes
-- **Video Import**: Upload video files (mp4, avi, mov, mkv, webm) and audio files (mp3, wav, ogg, m4a, aac)
-- **Clip Editor**: Create clips from source videos with filters (bw, sepia, vivid), speed adjustments, and volume control
-- **Event Creator**: Create interactive event clips with multiple choice options at any point
-- **Logic Editor**: Visual graph-based story editor with:
-  - Timeline-based choice triggers
-  - Variable system (set_var, req_var)
-  - Return-to-main logic for loops
-  - Background music per clip
-  - Mute audio option
-- **Smart Skip**: Automatically skip watched scenes in published builds
-- **Game Over Endings**: Mark clips as game-over endpoints
-- **Multi-select**: Bulk delete clips in library
-- **Analytics**: Track viewer choices and preferences
-- **Publish**: Generate standalone HTML interactive video players
+Environment variables: `PORT` (default 3000), `DB_FILE` (default `./database.sqlite`).
 
 ## Architecture
 
-### Backend (server.js)
+### Server (`server_new.js`; `server.js` just requires it)
 
-The Express server handles:
-- **Database**: SQLite with tables for `projects`, `videos`, `clips`, `edges` (story connections), and `analytics`
-- **API Endpoints**:
-  - `/api/projects` - Project CRUD operations
-  - `/api/upload` - Video/audio file uploads via Multer (2GB limit, validated file types)
-  - `/api/clip` - Create clips from source videos using FFmpeg
-  - `/api/create_event_clip` - Create interactive event clips
-  - `/api/story` - Retrieve clips and edges for story graph
-  - `/api/save_logic_block` - Save branching logic/choices
-  - `/api/publish` - Generate standalone interactive video HTML
-  - `/api/analytics/track` - Track viewer choices
-  - `/api/delete_clips_bulk` - Bulk delete clips
-  - `/api/clip/positions` - Save graph node positions
+- Express 5 + SQLite (`projects`, `videos`, `clips`, `edges`, `analytics`, `achievements`, `scene_presets`, `timelines`).
+- Routes: `/` → Timeline Studio (`public/studio/index.html`), `/classic` → classic studio (`public/index.html`), `/vendor/vue` → Vue from `node_modules`.
+- Rate limiting applies to `/api` only (static media/range requests are not limited).
+- Uploads: type decided by extension, content verified by header sniffing (`sniffMediaContainer`), non-browser-playable video converted to H.264/AAC MP4. Each uploaded video also gets a `FULL: <name>` clip row.
+- `/api/clip` cuts clips (IN/OUT validated against the source duration).
+- Timeline Studio API: `GET/POST /api/timeline` (sanitized with `sanitizeTimeline`), `POST /api/timeline/render` (background job queue, one render at a time) and `GET /api/render_jobs/:id`.
+- Rendering (`runTimelineRender`): main track stitched into one MP4 via a concat filter graph (scale/pad to one size, 30 fps, 48 kHz stereo, frame-quantized durations, silent audio for clips without audio). Option clips are encoded with the same settings. Output in `public/exports/<name>/` = `index.html` (player inlined, no CDN) + `movie.json` + `media/`.
+- Classic `/api/publish` still generates the playlist-based Vue player.
 
-### Frontend (public/)
+### Timeline data model (`timelines.data` JSON)
 
-Single-page Vue 3 application loaded via CDN with views:
-- **projects** - Project management and theme selection
-- **upload** - Video/audio file upload
-- **clipper** - Video trimming and segment creation with filters
-- **library** - Clip management with multi-select and bulk delete
-- **eventCreator** - Interactive event/choice creation
-- **logic** - Branching story graph editor with visual connections
-- **stats** - View analytics data
-- **publish** - Export and publish standalone player with preview
+```js
+{
+  version: 1,
+  items: [{ id, clipId }],                       // main movie, played back to back
+  choicePoints: [{ id, itemId, offset,            // anchored to a timeline item (moves with it)
+                   prompt, timeout, allowSkip, defaultOptionId,
+                   options: [{ id, label, clipId, color }] }]
+}
+```
 
-### Published Builds
+### Player (`public/player/interactive-player.js` + `.css`)
 
-The `/api/publish` endpoint generates self-contained HTML files with:
-- Clips and logic embedded as base64
-- Smart skip (auto-skip watched scenes)
-- Game over endings
-- Volume control
-- Timeline markers
-- Save/resume functionality via localStorage
+Dependency-free `InteractivePlayer` used by both the studio preview (several clips, double-buffered) and exports (one stitched file). It pauses at choice points, plays muted hover previews in the option cards, plays the chosen clip in a separate layer and then resumes the paused main video from the same frame. Expose state for tests via `element.__player.getSnapshot()`.
 
-## Key Technologies
+### Frontends
 
-- **Express.js** - Web server framework
-- **Vue.js 3** - Frontend SPA framework (CDN)
-- **FFmpeg/fluent-ffmpeg** - Video processing (clipping, trimming, filters)
-- **SQLite** - Local database storage
-- **Tailwind CSS** - Styling (CDN)
+- `public/studio/` — Timeline Studio (Vue 3 global build, in-DOM template in `index.html`, logic in `app.js`). `window.__studio` exposes the component for debugging/tests.
+- `public/index.html` — classic tabbed studio (graph editor, events, logic, stats, publish).
+- `public_new/` — earlier experimental UI, not served.

@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "start:v2": "node server_new.js",
-    "test": "node phase1-e2e.js"
+    "test": "node test/timeline.test.js",
+    "test:e2e": "node phase1-e2e.js"
   },
   "keywords": [
     "interactive-video",
@@ -32,6 +33,7 @@
     "multer": "^2.0.2",
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7",
-    "uuid": "^13.0.0"
+    "uuid": "^13.0.0",
+    "vue": "^3.5.13"
   }
 }

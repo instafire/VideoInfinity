@@ -35,43 +35,89 @@ function safePath(baseDir, userPath) {
     return resolved;
 }
 
-// FIX 3: File magic byte validation
-const MAGIC_BYTES = {
-    'video/mp4': [0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70], // mp4
-    'video/avi': [0x52, 0x49, 0x46, 0x46], // AVI
-    'video/quicktime': [0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70], // MOV
-    'video/x-matroska': [0x1A, 0x45, 0xDF, 0xA3], // MKV
-    'video/webm': [0x1A, 0x45, 0xDF, 0xA3], // WebM
-    'audio/mpeg': [0x49, 0x44, 0x33], // MP3
-    'audio/wav': [0x52, 0x49, 0x46, 0x46], // WAV (also RIFF)
-    'audio/ogg': [0x4F, 0x67, 0x67, 0x53], // OGG
-    'audio/mp4': [0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70], // M4A
-    'audio/aac': [0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70], // AAC
-    'image/jpeg': [0xFF, 0xD8, 0xFF], // JPG
-    'image/png': [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A], // PNG
-    'image/gif': [0x47, 0x49, 0x46, 0x38] // GIF
+// FIX 3: File content sniffing (magic bytes)
+// The previous check compared the first 8 bytes of MP4/MOV files against one exact
+// value (`00 00 00 18 ftyp`). The first 4 bytes are the size of the `ftyp` box and vary
+// between encoders (FFmpeg, OBS, Premiere and most phones write 0x1C or 0x20), so normal
+// MP4 uploads were rejected with "Invalid file content". We now sniff the container type.
+const UPLOAD_EXTENSIONS = {
+    video: new Set(['mp4', 'm4v', 'mov', 'avi', 'mkv', 'webm']),
+    audio: new Set(['mp3', 'wav', 'ogg', 'm4a', 'aac']),
+    image: new Set(['jpg', 'jpeg', 'png', 'gif', 'webp'])
 };
 
-function validateMagicBytes(buffer, mimetype) {
-    if (mimetype === 'image/webp') {
-        return buffer[0] === 0x52
-            && buffer[1] === 0x49
-            && buffer[2] === 0x46
-            && buffer[3] === 0x46
-            && buffer[8] === 0x57
-            && buffer[9] === 0x45
-            && buffer[10] === 0x42
-            && buffer[11] === 0x50;
-    }
-    const magic = MAGIC_BYTES[mimetype];
-    if (!magic) return true; // No validation for unknown types
+const ALLOWED_CONTAINERS = {
+    video: new Set(['isobmff', 'quicktime', 'matroska', 'avi']),
+    audio: new Set(['mp3', 'aac', 'ogg', 'wav', 'isobmff']),
+    image: new Set(['jpeg', 'png', 'gif', 'webp'])
+};
 
-    for (let i = 0; i < magic.length; i++) {
-        if (buffer[i] !== magic[i]) {
-            return false;
-        }
+function getUploadKind(originalName) {
+    const ext = path.extname(originalName || '').toLowerCase().slice(1);
+    return Object.keys(UPLOAD_EXTENSIONS).find((kind) => UPLOAD_EXTENSIONS[kind].has(ext)) || null;
+}
+
+function sniffMediaContainer(buf) {
+    if (!buf || buf.length < 4) return null;
+    const ascii = (start, end) => buf.toString('latin1', start, end);
+    if (buf.length >= 8 && ascii(4, 8) === 'ftyp') return 'isobmff';
+    if (buf.length >= 8 && ['moov', 'mdat', 'wide', 'free', 'skip', 'pnot'].includes(ascii(4, 8))) return 'quicktime';
+    if (buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3) return 'matroska';
+    if (ascii(0, 4) === 'RIFF' && buf.length >= 12) {
+        const subtype = ascii(8, 12);
+        if (subtype === 'AVI ') return 'avi';
+        if (subtype === 'WAVE') return 'wav';
+        if (subtype === 'WEBP') return 'webp';
+        return null;
     }
-    return true;
+    if (ascii(0, 3) === 'ID3') return 'mp3';
+    if (buf[0] === 0xFF && (buf[1] & 0xE0) === 0xE0) {
+        const layerBits = (buf[1] >> 1) & 0x03;
+        return layerBits === 0 ? 'aac' : 'mp3'; // ADTS AAC has layer 00, MPEG audio frames do not
+    }
+    if (ascii(0, 4) === 'OggS') return 'ogg';
+    if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'jpeg';
+    if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) return 'png';
+    if (ascii(0, 4) === 'GIF8') return 'gif';
+    return null;
+}
+
+function validateMagicBytes(buffer, kind) {
+    const container = sniffMediaContainer(buffer);
+    return Boolean(container && ALLOWED_CONTAINERS[kind] && ALLOWED_CONTAINERS[kind].has(container));
+}
+
+// Reads only the first `length` bytes. (fs.readFile ignores a `length` option, so the old
+// code loaded the whole upload — up to 2GB — into memory just to inspect 16 bytes.)
+async function readFileHead(filePath, length = 32) {
+    const handle = await fs.promises.open(filePath, 'r');
+    try {
+        const buffer = Buffer.alloc(length);
+        const { bytesRead } = await handle.read(buffer, 0, length, 0);
+        return buffer.subarray(0, bytesRead);
+    } finally {
+        await handle.close();
+    }
+}
+
+// Browsers can only play some container/codec combinations. Anything else is converted
+// to H.264/AAC MP4 on import so it can be previewed and edited in the studio.
+function isBrowserPlayable(metadata, ext) {
+    const streams = (metadata && metadata.streams) || [];
+    const video = streams.find((s) => s.codec_type === 'video');
+    const audio = streams.find((s) => s.codec_type === 'audio');
+    if (!video) return false;
+    const containerOk = ['mp4', 'm4v', 'mov', 'webm'].includes(ext);
+    const videoOk = ['h264', 'vp8', 'vp9', 'av1'].includes(video.codec_name);
+    const pixelFormatOk = !video.pix_fmt || ['yuv420p', 'yuvj420p'].includes(video.pix_fmt);
+    const audioOk = !audio || ['aac', 'mp3', 'opus', 'vorbis'].includes(audio.codec_name);
+    return containerOk && videoOk && pixelFormatOk && audioOk;
+}
+
+function ffprobeAsync(filePath) {
+    return new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(filePath, (err, data) => (err ? reject(err) : resolve(data)));
+    });
 }
 
 // FIX 6: Input validation
@@ -402,33 +448,44 @@ try {
 }
 // -------------------------------------
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const DB_FILE = process.env.DB_FILE || './database.sqlite';
 const app = express();
 
 // FIX 4: Restrict CORS to specific origins (configure as needed)
-const corsOptions = {
-    origin: function (origin, callback) {
-        // Allow requests with no origin (like mobile apps or curl requests)
-        // In production, replace with specific allowed origins
-        const allowedOrigins = [
-            'http://localhost:3000',
-            'http://localhost:8080',
-            'http://127.0.0.1:3000',
-            'http://127.0.0.1:8080'
-        ];
-        if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-            callback(null, true);
-        } else {
-            callback(new Error('Not allowed by CORS'));
-        }
-    },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
-    maxAge: 86400 // 24 hours
+const allowedOrigins = new Set([
+    `http://localhost:${PORT}`,
+    `http://127.0.0.1:${PORT}`,
+    'http://localhost:3000',
+    'http://localhost:8080',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:8080'
+]);
+
+const corsOptionsDelegate = (req, callback) => {
+    const origin = req.header('Origin');
+    let sameHost = false;
+    try {
+        sameHost = Boolean(origin) && new URL(origin).host === req.headers.host;
+    } catch (e) {
+        sameHost = false;
+    }
+    // Allow requests with no origin (curl, same-origin GETs), allow-listed dev origins,
+    // and the studio's own origin (e.g. when opened via a LAN IP or a custom PORT).
+    if (!origin || sameHost || allowedOrigins.has(origin)) {
+        callback(null, {
+            origin: true,
+            methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+            allowedHeaders: ['Content-Type', 'Authorization'],
+            credentials: true,
+            maxAge: 86400 // 24 hours
+        });
+    } else {
+        callback(new Error('Not allowed by CORS'));
+    }
 };
 
-app.use(cors(corsOptions));
+app.use(cors(corsOptionsDelegate));
 
 // FIX 5: Rate limiting to prevent DoS attacks
 const limiter = rateLimit({
@@ -450,18 +507,27 @@ const uploadLimiter = rateLimit({
     trustProxy: 1
 });
 
-app.use(limiter);
+// Only rate-limit the API. Previously every static request counted too — including the
+// many HTTP range requests a <video> element makes while playing/seeking — so a normal
+// editing session could hit the 1000-request cap and start getting 429s on media files.
+app.use('/api', limiter);
 app.use(express.json({ limit: '10mb' }));
+
+// Timeline Studio is the default editor; the original tabbed studio stays at /classic.
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'studio', 'index.html')));
+app.get('/classic', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+// Serve Vue from node_modules so the studio works offline (local-first).
+app.use('/vendor/vue', express.static(path.join(__dirname, 'node_modules', 'vue', 'dist')));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // 1. SETUP FOLDERS
-const folders = ['videos', 'clips', 'thumbnails', 'exports', 'audio'];
+const folders = ['videos', 'clips', 'thumbnails', 'exports', 'audio', 'images'];
 folders.forEach(f => fs.ensureDirSync(path.join(__dirname, 'public', f)));
 
 // 2. DATABASE INIT
 let db;
 (async () => {
-    db = await open({ filename: './database.sqlite', driver: sqlite3.Database });
+    db = await open({ filename: DB_FILE, driver: sqlite3.Database });
     
     // Core Tables
     await db.exec(`CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, theme_color TEXT DEFAULT '#3b82f6', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`);
@@ -481,6 +547,9 @@ let db;
 
     // Reusable Scene Presets
     await db.exec(`CREATE TABLE IF NOT EXISTS scene_presets (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER, preset_id TEXT UNIQUE, name TEXT, chapter_name TEXT, title_card TEXT, subtitle_text TEXT, scene_notes TEXT, bg_music TEXT, mute_audio INTEGER DEFAULT 0, is_game_over INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`);
+
+    // Timeline Studio: one saved timeline (main track + choice points) per project
+    await db.exec(`CREATE TABLE IF NOT EXISTS timelines (project_id INTEGER PRIMARY KEY, data TEXT NOT NULL, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);`);
 
     const migrations = [
         `ALTER TABLE projects ADD COLUMN theme_color TEXT DEFAULT '#3b82f6'`,
@@ -544,28 +613,26 @@ let db;
     console.log("✅ Studio Infinity Final v20.13 (Optimized) Ready");
 })();
 
+const UPLOAD_FOLDERS = { video: 'public/videos', audio: 'public/audio', image: 'public/images' };
+
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        const dest = file.mimetype.startsWith('audio')
-            ? 'public/audio'
-            : (file.mimetype.startsWith('image') ? 'public/images' : 'public/videos');
+        const dest = UPLOAD_FOLDERS[getUploadKind(file.originalname)] || 'public/videos';
         fs.ensureDirSync(path.join(__dirname, dest));
         cb(null, path.join(__dirname, dest));
     },
-    filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
+    // Random suffix avoids collisions when several files arrive in the same millisecond
+    filename: (req, file, cb) => cb(null, `${Date.now()}_${uuidv4().slice(0, 8)}${path.extname(file.originalname).toLowerCase()}`)
 });
 
 const fileFilter = (req, file, cb) => {
-    const videoTypes = /mp4|avi|mov|mkv|webm/;
-    const audioTypes = /mp3|wav|ogg|m4a|aac/;
-    const imageTypes = /jpg|jpeg|png|gif|webp/;
-    const ext = path.extname(file.originalname).toLowerCase().slice(1);
-    
-    if (file.mimetype.startsWith('video') && videoTypes.test(ext)) {
-        cb(null, true);
-    } else if (file.mimetype.startsWith('audio') && audioTypes.test(ext)) {
-        cb(null, true);
-    } else if (file.mimetype.startsWith('image') && imageTypes.test(ext)) {
+    // Decide by extension: browsers often send `application/octet-stream` for .mkv/.avi.
+    // The real content is verified after upload by sniffing the file header.
+    const kind = getUploadKind(file.originalname);
+    const mimeFamily = String(file.mimetype || '').split('/')[0];
+    const mimeConflicts = ['video', 'audio', 'image'].includes(mimeFamily) && mimeFamily !== kind
+        && !(kind === 'audio' && mimeFamily === 'video') && !(kind === 'video' && mimeFamily === 'audio');
+    if (kind && !mimeConflicts) {
         cb(null, true);
     } else {
         cb(new Error('Invalid file type. Only video, audio, and image files are allowed.'));
@@ -1050,29 +1117,44 @@ app.post('/api/delete_export', async (req, res) => {
     }
 });
 
-app.post('/api/upload', uploadLimiter, upload.single('file'), async (req, res) => {
+// Wrap multer so file-type / size errors come back as readable 400s instead of a generic 500
+const handleSingleUpload = (req, res, next) => {
+    upload.single('file')(req, res, (err) => {
+        if (!err) return next();
+        const message = err.code === 'LIMIT_FILE_SIZE'
+            ? 'File is too large (2GB max).'
+            : (err.message || 'Upload failed');
+        return res.status(400).json({ error: message });
+    });
+};
+
+app.post('/api/upload', uploadLimiter, handleSingleUpload, async (req, res) => {
     // FIX: Validate projectId properly - default to 1 only if not provided
     let projectId = req.body.projectId;
     if (!projectId) projectId = 1;
     if (!validateProjectId(projectId)) {
+        if (req.file) await fs.unlink(req.file.path).catch(() => {});
         return res.status(400).json({ error: 'Invalid project ID' });
     }
     if (!req.file) return res.status(400).json({ error: "No file" });
 
-    // FIX 3: Validate magic bytes for uploaded files
+    const kind = getUploadKind(req.file.originalname);
+
+    // FIX 3: Validate the real file content (header sniffing, see sniffMediaContainer)
     try {
-        const buffer = await fs.readFile(req.file.path, { length: 16 });
-        if (!validateMagicBytes(buffer, req.file.mimetype)) {
+        const buffer = await readFileHead(req.file.path, 32);
+        if (!validateMagicBytes(buffer, kind)) {
             await fs.unlink(req.file.path).catch(() => {});
-            return res.status(400).json({ error: 'Invalid file content' });
+            return res.status(400).json({ error: `"${req.file.originalname}" does not look like a valid ${kind} file.` });
         }
     } catch (err) {
         console.error('Magic byte validation error:', err);
+        await fs.unlink(req.file.path).catch(() => {});
         return res.status(400).json({ error: 'File validation failed' });
     }
 
     try {
-        if(req.file.mimetype.startsWith('audio')) {
+        if (kind === 'audio') {
             return res.json({
                 success: true,
                 type: 'audio',
@@ -1081,7 +1163,7 @@ app.post('/api/upload', uploadLimiter, upload.single('file'), async (req, res) =
             });
         }
 
-        if(req.file.mimetype.startsWith('image')) {
+        if (kind === 'image') {
             return res.json({
                 success: true,
                 type: 'image',
@@ -1090,24 +1172,51 @@ app.post('/api/upload', uploadLimiter, upload.single('file'), async (req, res) =
             });
         }
 
-        const filename = req.file.filename;
+        let filename = req.file.filename;
+        let diskPath = req.file.path;
+
+        let metadata;
+        try {
+            metadata = await ffprobeAsync(diskPath);
+        } catch (probeErr) {
+            console.error('FFprobe error:', probeErr);
+            await fs.unlink(diskPath).catch(() => {});
+            return res.status(400).json({ error: `Could not read "${req.file.originalname}". The file may be corrupted.` });
+        }
+
+        if (!(metadata.streams || []).some((s) => s.codec_type === 'video')) {
+            await fs.unlink(diskPath).catch(() => {});
+            return res.status(400).json({ error: `"${req.file.originalname}" has no video track.` });
+        }
+
+        // Convert formats the browser cannot play (AVI, MKV/HEVC, ProRes, 10-bit...) so the
+        // clip can be previewed, trimmed and placed on the timeline like any other video.
+        const ext = path.extname(filename).toLowerCase().slice(1);
+        if (!isBrowserPlayable(metadata, ext)) {
+            const webFilename = `${path.basename(filename, path.extname(filename))}_web.mp4`;
+            const webDiskPath = path.join(__dirname, 'public/videos', webFilename);
+            try {
+                const command = ffmpeg(diskPath)
+                    .videoCodec('libx264')
+                    .audioCodec('aac')
+                    .outputOptions(['-preset veryfast', '-crf 20', '-pix_fmt yuv420p', '-movflags +faststart'])
+                    .output(webDiskPath);
+                await runFfmpegCommand(command, 60 * 60 * 1000);
+                await fs.unlink(diskPath).catch(() => {});
+                filename = webFilename;
+                diskPath = webDiskPath;
+                metadata = await ffprobeAsync(diskPath);
+            } catch (convertErr) {
+                console.error('Video conversion error:', convertErr);
+                await fs.unlink(diskPath).catch(() => {});
+                await fs.unlink(webDiskPath).catch(() => {});
+                return res.status(500).json({ error: `Could not convert "${req.file.originalname}" to a web-friendly format.` });
+            }
+        }
+
         const webPath = `/videos/${filename}`;
-
-        // FIX: Use promise wrapper for ffprobe to avoid async callback issues
-        const metadata = await new Promise((resolve, reject) => {
-            ffmpeg.ffprobe(req.file.path, (err, data) => {
-                if (err) reject(err);
-                else resolve(data);
-            });
-        }).catch(err => {
-            console.error('FFprobe error:', err);
-            return res.status(500).json({ error: 'Failed to process video' });
-        });
-
-        if (!metadata) return; // Error already sent
-
-        const duration = metadata ? metadata.format.duration : 0;
-        const thumbnail = await generateThumbnail(req.file.path, filename);
+        const duration = Number(metadata.format && metadata.format.duration) || 0;
+        const thumbnail = await generateThumbnail(diskPath, filename);
 
         // FIX: Add transaction for atomic operations
         try {
@@ -1120,7 +1229,16 @@ app.post('/api/upload', uploadLimiter, upload.single('file'), async (req, res) =
                 [clipId, projectId, `FULL: ${req.file.originalname}`, webPath, thumbnail, result.lastID, duration, 100, 100]);
 
             await db.exec('COMMIT');
-            res.json({ success: true, type: 'video' });
+            res.json({
+                success: true,
+                type: 'video',
+                videoId: result.lastID,
+                clipId,
+                name: req.file.originalname,
+                path: webPath,
+                thumbnail,
+                duration
+            });
         } catch(dbErr) {
             await db.exec('ROLLBACK');
             console.error('Database error:', dbErr);
@@ -1328,10 +1446,16 @@ app.post('/api/clip', async (req, res) => {
         const outputFilename = `clip_${clipId}.mp4`;
         const outputPath = path.join(__dirname, 'public/clips', outputFilename);
         
-        let duration = parseFloat(end) - parseFloat(start);
-        if(duration < 0) duration = 0.5;
+        const startSec = Math.max(0, parseFloat(start));
+        let endSec = parseFloat(end);
+        const sourceDuration = Number(video.duration) || 0;
+        if (sourceDuration > 0) endSec = Math.min(endSec, sourceDuration);
+        if (!(endSec - startSec >= 0.1)) {
+            return res.status(400).json({ error: 'The clip must be at least 0.1s long (OUT has to be after IN).' });
+        }
+        let duration = endSec - startSec;
 
-        let command = ffmpeg(sourcePath).setStartTime(start).setDuration(duration);
+        let command = ffmpeg(sourcePath).setStartTime(startSec).setDuration(duration);
         
         if(speed && parseFloat(speed)!==1.0) { 
             command.audioFilters(`atempo=${parseFloat(speed)}`); 
@@ -1349,14 +1473,16 @@ app.post('/api/clip', async (req, res) => {
             command.audioFilters(`volume=${parseFloat(volume)}`); 
         }
         
-        command.videoCodec('libx264').audioCodec('aac').outputOptions('-preset ultrafast').output(outputPath);
+        command.videoCodec('libx264').audioCodec('aac')
+            .outputOptions(['-preset ultrafast', '-pix_fmt yuv420p', '-movflags +faststart'])
+            .output(outputPath);
 
         try {
             await runFfmpegCommand(command, 300000);
             const thumbnail = await generateThumbnail(outputPath, outputFilename);
             const webPath = `/clips/${outputFilename}`;
             await db.run('INSERT INTO clips (unique_id, project_id, name, filepath, thumbnail, source_video_id, duration, start_time, end_time, x, y, is_event_clip, is_game_over) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)',
-                [clipId, projectId, name, webPath, thumbnail, sourceId, duration, start, end, 150, 150]);
+                [clipId, projectId, name, webPath, thumbnail, sourceId, duration, startSec, endSec, 150, 150]);
             res.json({ success: true, clipId });
         } catch (renderErr) {
             console.error('Clip render error:', renderErr);
@@ -1526,34 +1652,26 @@ app.post('/api/clip/update', async (req, res) => {
     if (!validateUuid(id)) {
         return res.status(400).json({ error: 'Invalid clip ID' });
     }
-    if (typeof name !== 'string' || name.length > 200) {
+    if (typeof name !== 'string' || !name.trim() || name.length > 200) {
         return res.status(400).json({ error: 'Invalid name' });
     }
+    // Partial update: only touch the fields that were sent. (The classic studio and the
+    // Timeline Studio rename clips with just {id, name}; previously that reset the
+    // chapter, title card, subtitle, music and game-over settings to empty.)
+    const has = (key) => Object.prototype.hasOwnProperty.call(req.body, key);
+    const updates = [['name', name.trim()]];
+    if (has('isGameOver')) updates.push(['is_game_over', isGameOver ? 1 : 0]);
+    if (has('chapterName')) updates.push(['chapter_name', normalizeNullableText(chapterName, 120)]);
+    if (has('titleCard')) updates.push(['title_card', normalizeNullableText(titleCard, 240)]);
+    if (has('subtitleText')) updates.push(['subtitle_text', normalizeNullableText(subtitleText, 1200)]);
+    if (has('sceneNotes')) updates.push(['scene_notes', normalizeNullableText(sceneNotes, 2000)]);
+    if (has('presetId')) updates.push(['preset_id', normalizeNullableText(presetId, 120)]);
+    if (has('bgMusic')) updates.push(['bg_music', normalizeNullableText(bgMusic, 300)]);
+    if (has('muteAudio')) updates.push(['mute_audio', isTruthyFlag(muteAudio) ? 1 : 0]);
     try {
         await db.run(
-            `UPDATE clips SET
-                name = ?,
-                is_game_over = ?,
-                chapter_name = ?,
-                title_card = ?,
-                subtitle_text = ?,
-                scene_notes = ?,
-                preset_id = ?,
-                bg_music = ?,
-                mute_audio = ?
-            WHERE unique_id = ?`,
-            [
-                name,
-                isGameOver ? 1 : 0,
-                normalizeNullableText(chapterName, 120),
-                normalizeNullableText(titleCard, 240),
-                normalizeNullableText(subtitleText, 1200),
-                normalizeNullableText(sceneNotes, 2000),
-                normalizeNullableText(presetId, 120),
-                normalizeNullableText(bgMusic, 300),
-                isTruthyFlag(muteAudio) ? 1 : 0,
-                id
-            ]
+            `UPDATE clips SET ${updates.map(([column]) => `${column} = ?`).join(', ')} WHERE unique_id = ?`,
+            [...updates.map(([, value]) => value), id]
         );
         res.json({ success: true });
     } catch(err) {
@@ -1728,6 +1846,561 @@ app.post('/api/delete_logic_block', async (req, res) => {
         // FIX 7: Don't expose err.message in production
         res.status(500).json({ error: 'Failed to delete logic block' });
     }
+});
+
+// =====================================================================
+// TIMELINE STUDIO
+// One saved timeline per project:
+//   items        -> the main movie track, played back-to-back
+//   choicePoints -> interactive moments anchored to a timeline item (itemId + offset), so
+//                   they move with their clip when clips are reordered. Each has 1-6
+//                   options and every option points at a clip. When the viewer picks an
+//                   option, that clip plays and the main movie then resumes exactly where
+//                   it paused.
+// Rendering stitches the main track into ONE mp4 and encodes each option clip, then
+// writes a self-contained player (public/player/*) that needs no CDN.
+// =====================================================================
+
+const TIMELINE_LIMITS = { items: 500, choicePoints: 300, options: 6 };
+const HEX_COLOR_RE = /^#[0-9a-f]{6}$/i;
+const RENDER_FPS = 30;
+
+function emptyTimeline() {
+    return { version: 1, items: [], choicePoints: [] };
+}
+
+function cleanTimelineId(value) {
+    return typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value) ? value : null;
+}
+
+function sanitizeTimeline(input, clipMap) {
+    const timeline = emptyTimeline();
+    const source = input && typeof input === 'object' ? input : {};
+
+    const seenItems = new Set();
+    (Array.isArray(source.items) ? source.items : []).slice(0, TIMELINE_LIMITS.items).forEach((item) => {
+        if (!item || typeof item !== 'object') return;
+        const id = cleanTimelineId(item.id) || uuidv4();
+        if (seenItems.has(id) || typeof item.clipId !== 'string' || !clipMap.has(item.clipId)) return;
+        seenItems.add(id);
+        timeline.items.push({ id, clipId: item.clipId });
+    });
+
+    const itemMap = new Map(timeline.items.map((item) => [item.id, item]));
+    const seenPoints = new Set();
+    (Array.isArray(source.choicePoints) ? source.choicePoints : []).slice(0, TIMELINE_LIMITS.choicePoints).forEach((point) => {
+        if (!point || typeof point !== 'object') return;
+        const item = itemMap.get(point.itemId);
+        if (!item) return; // its clip was removed from the timeline
+        const id = cleanTimelineId(point.id) || uuidv4();
+        if (seenPoints.has(id)) return;
+        seenPoints.add(id);
+
+        const seenOptions = new Set();
+        const options = [];
+        (Array.isArray(point.options) ? point.options : []).slice(0, TIMELINE_LIMITS.options).forEach((option) => {
+            if (!option || typeof option !== 'object') return;
+            const optionId = cleanTimelineId(option.id) || uuidv4();
+            if (seenOptions.has(optionId)) return;
+            seenOptions.add(optionId);
+            options.push({
+                id: optionId,
+                label: normalizeText(option.label, 80),
+                // null = not assigned yet (kept so the label isn't lost while editing)
+                clipId: typeof option.clipId === 'string' && clipMap.has(option.clipId) ? option.clipId : null,
+                color: HEX_COLOR_RE.test(option.color || '') ? option.color : '#ffffff'
+            });
+        });
+
+        const clip = clipMap.get(item.clipId);
+        timeline.choicePoints.push({
+            id,
+            itemId: item.id,
+            offset: clampNumber(point.offset, 0, Math.max(0, Number(clip.duration) || 0), 0),
+            prompt: normalizeText(point.prompt, 160),
+            timeout: clampNumber(point.timeout, 0, 120, 0),
+            allowSkip: point.allowSkip !== false,
+            defaultOptionId: options.some((o) => o.id === point.defaultOptionId) ? point.defaultOptionId : null,
+            options
+        });
+    });
+
+    return timeline;
+}
+
+async function loadProjectTimeline(projectId, clipMap) {
+    const row = await db.get('SELECT data, updated_at FROM timelines WHERE project_id = ?', [projectId]);
+    let parsed = emptyTimeline();
+    if (row) {
+        try {
+            parsed = JSON.parse(row.data);
+        } catch (e) {
+            console.warn(`Timeline for project ${projectId} is not valid JSON; starting empty.`);
+        }
+    }
+    return { timeline: sanitizeTimeline(parsed, clipMap), updatedAt: row ? row.updated_at : null };
+}
+
+app.get('/api/timeline', async (req, res) => {
+    const projectId = req.query.projectId || 1;
+    if (!validateProjectId(projectId)) {
+        return res.status(400).json({ error: 'Invalid project ID' });
+    }
+    try {
+        const clips = await db.all('SELECT unique_id, duration FROM clips WHERE project_id = ?', [projectId]);
+        const result = await loadProjectTimeline(projectId, new Map(clips.map((c) => [c.unique_id, c])));
+        res.json(result);
+    } catch (err) {
+        console.error('Error loading timeline:', err);
+        res.status(500).json({ error: 'Failed to load timeline' });
+    }
+});
+
+app.post('/api/timeline', async (req, res) => {
+    const { projectId, timeline } = req.body;
+    if (!validateProjectId(projectId)) {
+        return res.status(400).json({ error: 'Invalid project ID' });
+    }
+    if (!timeline || typeof timeline !== 'object') {
+        return res.status(400).json({ error: 'Invalid timeline' });
+    }
+    try {
+        const project = await db.get('SELECT id FROM projects WHERE id = ?', [projectId]);
+        if (!project) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+        const clips = await db.all('SELECT unique_id, duration FROM clips WHERE project_id = ?', [projectId]);
+        const clean = sanitizeTimeline(timeline, new Map(clips.map((c) => [c.unique_id, c])));
+        await db.run(
+            `INSERT INTO timelines (project_id, data, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+             ON CONFLICT(project_id) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP`,
+            [projectId, JSON.stringify(clean)]
+        );
+        res.json({ success: true, timeline: clean });
+    } catch (err) {
+        console.error('Error saving timeline:', err);
+        res.status(500).json({ error: 'Failed to save timeline' });
+    }
+});
+
+// --- Timeline rendering (background jobs) ---
+const renderJobs = new Map();
+let renderQueue = Promise.resolve();
+
+function publicRenderJob(job) {
+    return {
+        id: job.id,
+        projectId: job.projectId,
+        status: job.status,
+        progress: Math.round(job.progress * 1000) / 1000,
+        stage: job.stage,
+        url: job.url,
+        exportName: job.exportName,
+        error: job.error
+    };
+}
+
+function pruneRenderJobs() {
+    const cutoff = Date.now() - 6 * 60 * 60 * 1000;
+    for (const [id, job] of renderJobs) {
+        if (job.finishedAt && job.finishedAt < cutoff) renderJobs.delete(id);
+    }
+}
+
+function parseTimemark(timemark) {
+    if (typeof timemark !== 'string') return 0;
+    return timemark.split(':').reduce((total, part) => total * 60 + (parseFloat(part) || 0), 0);
+}
+
+function roundTime(value) {
+    return Math.round(value * 1000) / 1000;
+}
+
+function slugifyTitle(title) {
+    return String(title || '').replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase().slice(0, 60) || 'movie';
+}
+
+function getRotation(videoStream) {
+    if (!videoStream) return 0;
+    const tagRotation = Number(videoStream.tags && videoStream.tags.rotate);
+    if (Number.isFinite(tagRotation) && tagRotation) return tagRotation;
+    const sideData = (videoStream.side_data_list || []).find((entry) => entry && entry.rotation !== undefined);
+    return sideData ? Number(sideData.rotation) || 0 : 0;
+}
+
+function describeMedia(metadata, clip) {
+    const streams = (metadata && metadata.streams) || [];
+    const video = streams.find((s) => s.codec_type === 'video');
+    const audio = streams.find((s) => s.codec_type === 'audio');
+    let width = Number(video && video.width) || 0;
+    let height = Number(video && video.height) || 0;
+    if (Math.abs(getRotation(video)) % 180 === 90) {
+        [width, height] = [height, width]; // FFmpeg auto-rotates phone footage while decoding
+    }
+    const duration = Number(video && video.duration)
+        || Number(metadata && metadata.format && metadata.format.duration)
+        || Number(clip && clip.duration)
+        || 0;
+    return { width, height, hasAudio: Boolean(audio), duration };
+}
+
+function chooseRenderSize(first, resolution) {
+    const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+    const width = first.width || 1280;
+    const height = first.height || 720;
+    const aspect = width / height;
+    const presets = { '480p': 480, '720p': 720, '1080p': 1080 };
+    if (presets[resolution]) {
+        const shortSide = presets[resolution];
+        return aspect >= 1
+            ? { width: even(shortSide * aspect), height: even(shortSide) }
+            : { width: even(shortSide), height: even(shortSide / aspect) };
+    }
+    // Auto: match the first clip, capped at 1080p
+    const scale = Math.min(1, 1920 / Math.max(width, height), 1080 / Math.min(width, height));
+    return { width: even(width * scale), height: even(height * scale) };
+}
+
+// Encodes one or more inputs into a single normalized mp4 (same size, fps, pixel format and
+// audio layout). Durations are frame-quantized and every segment's audio is padded/trimmed
+// to exactly its video length, so stitched segments never drift out of sync.
+function renderNormalizedVideo(segments, outPath, size, onProgress) {
+    const { width: W, height: H } = size;
+    const command = ffmpeg();
+    segments.forEach((segment) => command.input(segment.file));
+
+    const filters = [];
+    const concatPads = [];
+    segments.forEach((segment, i) => {
+        const duration = segment.renderDuration.toFixed(6);
+        filters.push(
+            `[${i}:v:0]fps=${RENDER_FPS},scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
+            `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,` +
+            `tpad=stop_mode=clone:stop_duration=2,trim=duration=${duration},setpts=PTS-STARTPTS[v${i}]`
+        );
+        filters.push(segment.hasAudio
+            ? `[${i}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad,atrim=duration=${duration},asetpts=PTS-STARTPTS[a${i}]`
+            : `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=${duration},asetpts=PTS-STARTPTS[a${i}]`);
+        concatPads.push(`[v${i}][a${i}]`);
+    });
+    if (segments.length > 1) {
+        filters.push(`${concatPads.join('')}concat=n=${segments.length}:v=1:a=1[vout][aout]`);
+    } else {
+        filters.push('[v0]null[vout]', '[a0]anull[aout]');
+    }
+
+    const totalSeconds = segments.reduce((sum, segment) => sum + segment.renderDuration, 0);
+    command
+        .complexFilter(filters)
+        .outputOptions([
+            '-map [vout]', '-map [aout]',
+            '-c:v libx264', '-preset veryfast', '-crf 21', '-pix_fmt yuv420p', `-r ${RENDER_FPS}`,
+            '-c:a aac', '-b:a 160k', '-ar 48000',
+            '-movflags +faststart'
+        ])
+        .output(outPath)
+        .on('progress', (progress) => {
+            if (onProgress && progress && progress.timemark) onProgress(parseTimemark(progress.timemark));
+        });
+
+    return runFfmpegCommand(command, Math.max(10 * 60 * 1000, totalSeconds * 1000 * 8));
+}
+
+function extractPosterFrame(videoFile, outFile, atSeconds) {
+    const command = ffmpeg(videoFile)
+        .seekInput(Math.max(0, atSeconds))
+        .outputOptions(['-frames:v 1', '-q:v 3'])
+        .output(outFile);
+    return runFfmpegCommand(command, 60000).then(() => true).catch((err) => {
+        console.warn('Poster extraction failed:', err.message);
+        return false;
+    });
+}
+
+async function buildTimelinePlayerHtml(manifest) {
+    const [css, js] = await Promise.all([
+        fs.readFile(path.join(__dirname, 'public/player/interactive-player.css'), 'utf8'),
+        fs.readFile(path.join(__dirname, 'public/player/interactive-player.js'), 'utf8')
+    ]);
+    const safeJson = JSON.stringify(manifest)
+        .replace(/</g, '\\u003c')
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029');
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${escapeHtml(manifest.title)}</title>
+<link rel="icon" href="data:,">
+<style>
+html, body { margin: 0; height: 100%; background: #000; }
+#movie { position: fixed; inset: 0; }
+${css.replace(/<\/style/gi, '<\\/style')}
+</style>
+</head>
+<body>
+<div id="movie"></div>
+<script>window.__MOVIE__ = ${safeJson};</script>
+<script>
+${js.replace(/<\/script/gi, '<\\/script')}
+</script>
+<script>
+(function () {
+    var movie = window.__MOVIE__;
+    var canTrack = /^https?:$/.test(location.protocol);
+    function track(eventType, label, target) {
+        if (!canTrack || !target) return;
+        try {
+            fetch('/api/analytics/track', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ projectId: movie.projectId, label: label, target: target, source: 'published', eventType: eventType })
+            }).catch(function () {});
+        } catch (e) {}
+    }
+    new InteractivePlayer(document.getElementById('movie'), Object.assign({}, movie, {
+        startScreen: true,
+        onEvent: function (type, detail) {
+            if (type === 'choice' && detail && detail.option) track('choice', detail.option.label || 'Choice', detail.option.clipId);
+        }
+    }));
+})();
+</script>
+</body>
+</html>`;
+}
+
+async function buildRenderPlan(projectId) {
+    const project = await db.get('SELECT * FROM projects WHERE id = ?', [projectId]);
+    if (!project) return { error: 'Project not found' };
+
+    const clips = await db.all('SELECT * FROM clips WHERE project_id = ?', [projectId]);
+    const clipMap = new Map(clips.map((c) => [c.unique_id, c]));
+    const { timeline } = await loadProjectTimeline(projectId, clipMap);
+    if (!timeline.items.length) {
+        return { error: 'Add at least one clip to the main timeline before exporting.' };
+    }
+
+    const publicDir = path.join(__dirname, 'public');
+    const missing = new Set();
+    const resolveFile = (clip) => {
+        const file = safePath(publicDir, String(clip.filepath || '').replace(/^\/+/, ''));
+        if (!file || !fs.existsSync(file)) missing.add(clip.name);
+        return file;
+    };
+
+    const items = timeline.items.map((item) => {
+        const clip = clipMap.get(item.clipId);
+        return { ...item, clip, file: resolveFile(clip) };
+    });
+    const points = timeline.choicePoints
+        .map((point) => ({
+            ...point,
+            options: point.options
+                .filter((option) => option.clipId)
+                .map((option) => {
+                    const clip = clipMap.get(option.clipId);
+                    return { ...option, clip, file: resolveFile(clip) };
+                })
+        }))
+        .filter((point) => point.options.length > 0);
+
+    if (missing.size) {
+        return { error: `These clips are missing their video files: ${[...missing].join(', ')}` };
+    }
+    return { project, items, points };
+}
+
+async function runTimelineRender(job, plan, title, resolution) {
+    job.status = 'rendering';
+    job.stage = 'Analyzing clips';
+    const exportName = `${slugifyTitle(title)}_${job.projectId}_${Date.now()}`;
+    const exportDir = path.join(__dirname, 'public/exports', exportName);
+    const mediaDir = path.join(exportDir, 'media');
+    const toFrames = (seconds) => Math.max(1, Math.round(seconds * RENDER_FPS)) / RENDER_FPS;
+
+    try {
+        await fs.ensureDir(mediaDir);
+        const probes = new Map();
+        const probe = async (file) => {
+            if (!probes.has(file)) probes.set(file, await ffprobeAsync(file));
+            return probes.get(file);
+        };
+
+        // Main track: exact durations from the files themselves
+        const mainSegments = [];
+        for (const item of plan.items) {
+            const info = describeMedia(await probe(item.file), item.clip);
+            mainSegments.push({ item, file: item.file, ...info, renderDuration: toFrames(info.duration) });
+        }
+        let cursor = 0;
+        mainSegments.forEach((segment) => {
+            segment.start = cursor;
+            cursor += segment.renderDuration;
+        });
+        const mainDuration = cursor;
+        const size = chooseRenderSize(mainSegments[0], resolution);
+
+        // Option clips: each distinct clip is encoded once, even if several options use it
+        const optionFiles = new Map();
+        for (const point of plan.points) {
+            for (const option of point.options) {
+                if (optionFiles.has(option.clipId)) continue;
+                const info = describeMedia(await probe(option.file), option.clip);
+                const index = optionFiles.size + 1;
+                optionFiles.set(option.clipId, {
+                    clip: option.clip,
+                    file: option.file,
+                    ...info,
+                    renderDuration: toFrames(info.duration),
+                    outName: `option_${index}.mp4`,
+                    posterName: `option_${index}.jpg`
+                });
+            }
+        }
+
+        const totalWork = mainDuration + [...optionFiles.values()].reduce((sum, o) => sum + o.renderDuration, 0);
+        let doneWork = 0;
+        const report = (stage, seconds = 0) => {
+            job.stage = stage;
+            job.progress = Math.min(0.99, (doneWork + Math.max(0, seconds)) / Math.max(totalWork, 0.001));
+        };
+
+        report(`Stitching ${mainSegments.length} clip${mainSegments.length === 1 ? '' : 's'} into one movie`);
+        await renderNormalizedVideo(mainSegments, path.join(mediaDir, 'main.mp4'), size,
+            (seconds) => report(`Stitching ${mainSegments.length} clip${mainSegments.length === 1 ? '' : 's'} into one movie`, seconds));
+        doneWork += mainDuration;
+
+        let optionIndex = 0;
+        for (const option of optionFiles.values()) {
+            optionIndex += 1;
+            const stage = `Encoding choice clip ${optionIndex} of ${optionFiles.size}`;
+            report(stage);
+            const outFile = path.join(mediaDir, option.outName);
+            await renderNormalizedVideo([option], outFile, size, (seconds) => report(stage, seconds));
+            option.hasPoster = await extractPosterFrame(outFile, path.join(mediaDir, option.posterName), Math.min(option.renderDuration * 0.2, 2));
+            doneWork += option.renderDuration;
+        }
+
+        report('Writing player');
+        const hasMainPoster = await extractPosterFrame(path.join(mediaDir, 'main.mp4'), path.join(mediaDir, 'poster.jpg'), Math.min(1, mainDuration / 2));
+        const segmentByItem = new Map(mainSegments.map((segment) => [segment.item.id, segment]));
+        const choicePoints = plan.points
+            .map((point) => {
+                const segment = segmentByItem.get(point.itemId);
+                const time = Math.min(segment.start + Math.min(point.offset, segment.renderDuration), mainDuration);
+                return {
+                    id: point.id,
+                    time: roundTime(time),
+                    prompt: point.prompt,
+                    timeout: point.timeout,
+                    allowSkip: point.allowSkip,
+                    defaultOptionId: point.defaultOptionId,
+                    options: point.options.map((option) => {
+                        const file = optionFiles.get(option.clipId);
+                        return {
+                            id: option.id,
+                            label: option.label || String(file.clip.name || 'Option').replace(/^FULL:\s*/, ''),
+                            color: option.color,
+                            clipId: option.clipId,
+                            src: `media/${file.outName}`,
+                            poster: file.hasPoster ? `media/${file.posterName}` : '',
+                            duration: roundTime(file.renderDuration)
+                        };
+                    })
+                };
+            })
+            .sort((a, b) => a.time - b.time);
+
+        const manifest = {
+            version: 1,
+            title,
+            projectId: job.projectId,
+            createdAt: new Date().toISOString(),
+            width: size.width,
+            height: size.height,
+            duration: roundTime(mainDuration),
+            poster: hasMainPoster ? 'media/poster.jpg' : '',
+            theme: validateColor(plan.project.theme_color || '') ? plan.project.theme_color : '#3b82f6',
+            segments: [{ src: 'media/main.mp4', duration: roundTime(mainDuration) }],
+            chapters: mainSegments.map((segment) => ({
+                start: roundTime(segment.start),
+                name: String(segment.item.clip.name || '').replace(/^FULL:\s*/, '')
+            })),
+            choicePoints
+        };
+
+        await fs.writeJson(path.join(exportDir, 'movie.json'), manifest, { spaces: 2 });
+        await fs.writeFile(path.join(exportDir, 'index.html'), await buildTimelinePlayerHtml(manifest));
+
+        job.status = 'done';
+        job.progress = 1;
+        job.stage = 'Done';
+        job.exportName = exportName;
+        job.url = `/exports/${exportName}/index.html`;
+    } catch (err) {
+        console.error('Timeline render failed:', err);
+        job.status = 'error';
+        job.stage = 'Failed';
+        job.error = err && err.code === 'FFMPEG_TIMEOUT'
+            ? 'Rendering timed out.'
+            : 'Rendering failed. Check the server log for the FFmpeg error.';
+        await fs.remove(exportDir).catch(() => {});
+    } finally {
+        job.finishedAt = Date.now();
+    }
+}
+
+app.post('/api/timeline/render', async (req, res) => {
+    const { projectId, title, resolution } = req.body;
+    if (!validateProjectId(projectId)) {
+        return res.status(400).json({ error: 'Invalid project ID' });
+    }
+    const cleanTitle = normalizeText(title, 200) || 'Interactive Movie';
+    const cleanResolution = ['480p', '720p', '1080p'].includes(resolution) ? resolution : 'auto';
+
+    try {
+        for (const job of renderJobs.values()) {
+            if (job.projectId === Number(projectId) && (job.status === 'queued' || job.status === 'rendering')) {
+                return res.json({ success: true, job: publicRenderJob(job) });
+            }
+        }
+
+        const plan = await buildRenderPlan(projectId);
+        if (plan.error) {
+            return res.status(400).json({ error: plan.error });
+        }
+
+        const job = {
+            id: uuidv4(),
+            projectId: Number(projectId),
+            status: 'queued',
+            progress: 0,
+            stage: 'Waiting to start',
+            url: null,
+            exportName: null,
+            error: null,
+            createdAt: Date.now(),
+            finishedAt: null
+        };
+        renderJobs.set(job.id, job);
+        pruneRenderJobs();
+        // One render at a time keeps the machine responsive
+        renderQueue = renderQueue.then(() => runTimelineRender(job, plan, cleanTitle, cleanResolution)).catch(() => {});
+        res.json({ success: true, job: publicRenderJob(job) });
+    } catch (err) {
+        console.error('Error starting render:', err);
+        res.status(500).json({ error: 'Failed to start rendering' });
+    }
+});
+
+app.get('/api/render_jobs/:id', (req, res) => {
+    const job = renderJobs.get(req.params.id);
+    if (!job) {
+        return res.status(404).json({ error: 'Render job not found' });
+    }
+    res.json({ job: publicRenderJob(job) });
 });
 
 // --- PUBLISH ENGINE ---
@@ -2370,12 +3043,12 @@ app.post('/api/publish', async (req, res) => {
                 // --- SMART SKIP LOGIC (PATCHED) ---
                 mergeSeenSegments() {
                     if (this.seenSegments.length < 2) return;
-                    this.seenSegments.sort((a, b) => a.start - b.start);
+                    this.seenSegments.sort((a, b) => (String(a.sourceId).localeCompare(String(b.sourceId))) || (a.start - b.start));
                     const merged = [];
                     let current = this.seenSegments[0];
                     for (let i = 1; i < this.seenSegments.length; i++) {
                         const next = this.seenSegments[i];
-                        if (current.end >= next.start - 0.5) { 
+                        if (current.sourceId === next.sourceId && current.end >= next.start - 0.5) {
                             current.end = Math.max(current.end, next.end);
                         } else {
                             merged.push(current);
@@ -2388,60 +3061,39 @@ app.post('/api/publish', async (req, res) => {
                 recordClipAsSeen(clipId, fromSourceId) {
                     const subClip = CLIPS.find(c => c.unique_id === clipId);
                     if(subClip && subClip.source_video_id === fromSourceId && !subClip.name.startsWith("FULL:")) {
-                        this.seenSegments.push({ start: subClip.start_time, end: subClip.end_time });
+                        this.seenSegments.push({ start: subClip.start_time, end: subClip.end_time, sourceId: fromSourceId });
                         this.mergeSeenSegments();
                         this.saveGame();
                     }
                 },
                 performSmartSkip(currentTime, player) {
-                    if(!this.smartSkipEnabled || this.isManualSeeking) return;
+                    // Smart Skip only applies while a FULL source video is playing: it skips the
+                    // parts the viewer already watched as a sub-clip cut from that same source.
+                    // Seen segments are stored in source-video time, which only equals player time
+                    // for FULL clips. (Applying them to cut clips skipped most of every scene and
+                    // jumped straight past choice points, so choices never appeared.)
+                    if(!this.smartSkipEnabled || this.isManualSeeking || !this.currentClip) return;
+                    if(!String(this.currentClip.name || '').startsWith('FULL:')) return;
+                    const sourceId = this.currentClip.source_video_id;
 
                     for(const seg of this.seenSegments) {
+                        if(seg.sourceId !== sourceId || !(seg.end > seg.start)) continue;
                         // FIX 2: Dynamic buffer for short clips
                         const buffer = Math.min(0.5, (seg.end - seg.start) / 2);
-
                         if(currentTime >= seg.start && currentTime < seg.end - buffer) {
                             let targetTime = seg.end;
-
-                            // FIX 3: Check for interactions inside the skipped area
-                            // Find any active blocks (choices) that occur within this segment
+                            // FIX 3: never skip over a choice that has not been shown yet
                             const interactionInSegment = this.activeBlocks.find(b =>
-                                b.time > currentTime && b.time < seg.end
+                                !this.triggeredBlocks.has(b.id) && b.time >= currentTime && b.time < seg.end
                             );
-
                             if (interactionInSegment) {
-                                // Do NOT skip past the choice. Stop just before it.
                                 targetTime = Math.max(currentTime, interactionInSegment.time - 0.5);
                             }
-
                             // Only skip if the jump is significant
-                            if (Math.abs(player.currentTime - targetTime) > 0.5) {
+                            if (targetTime - player.currentTime > 0.5) {
                                 player.currentTime = targetTime;
                             }
                             return;
-                        }
-                    }
-
-                    // NEW: Smart skip for source video - check if this clip's source has watched segments
-                    if(this.currentClip && this.currentClip.source_video_id) {
-                        for(const seg of this.seenSegments) {
-                            if(seg.sourceId === this.currentClip.source_video_id) {
-                                const buffer = Math.min(0.5, (seg.end - seg.start) / 2);
-                                if(currentTime >= seg.start && currentTime < seg.end - buffer) {
-                                    // Check for interactions in this segment
-                                    const interactionInSegment = this.activeBlocks.find(b =>
-                                        b.time > currentTime && b.time < seg.end
-                                    );
-                                    let targetTime = seg.end;
-                                    if(interactionInSegment) {
-                                        targetTime = Math.max(currentTime, interactionInSegment.time - 0.5);
-                                    }
-                                    if(Math.abs(player.currentTime - targetTime) > 0.5) {
-                                        player.currentTime = targetTime;
-                                    }
-                                    return;
-                                }
-                            }
                         }
                     }
                 },
@@ -2472,17 +3124,8 @@ app.post('/api/publish', async (req, res) => {
                     this.isGameOver = false;
                     this.triggeredBlocks.clear();
                     this.seenSegments = this.seenSegments || [];
-
-                    // NEW: Auto-mark clip ranges as seen for source video (Smart Skip for source video)
-                    if(nextClip.source_video_id && nextClip.start_time !== undefined && nextClip.end_time !== undefined) {
-                        const clipRange = { start: nextClip.start_time, end: nextClip.end_time, sourceId: nextClip.source_video_id };
-                        // Check if this range is already in seenSegments
-                        const alreadySeen = this.seenSegments.some(seg => seg.start === clipRange.start && seg.end === clipRange.end);
-                        if(!alreadySeen) {
-                            this.seenSegments.push(clipRange);
-                            this.mergeSeenSegments();
-                        }
-                    }
+                    // Note: a clip is only recorded as "seen" after it finishes (recordClipAsSeen).
+                    // Marking it as seen while loading made Smart Skip jump over the clip itself.
 
                     // SCENE TRANSITION: Fade out current video before loading new clip
                     const performTransition = function() {
@@ -2651,7 +3294,11 @@ app.post('/api/publish', async (req, res) => {
                 isLocked(ch){if(!ch.reqVar)return false;return !this.gameState[ch.reqVar]},
                 makeChoice(choice){
                     if(this.isLocked(choice))return;
-                    const returnTime = (this.currentOptions && this.currentOptions.time) ? this.currentOptions.time : 0;
+                    // Resume exactly where playback paused for the choice
+                    const pausedAt = this.$refs.player ? Number(this.$refs.player.currentTime) : NaN;
+                    const returnTime = Number.isFinite(pausedAt) && pausedAt > 0
+                        ? pausedAt
+                        : ((this.currentOptions && this.currentOptions.time) ? this.currentOptions.time : 0);
                     this.closeChoiceOverlay();
 
                     // Analytics
@@ -2764,4 +3411,7 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => console.log(`Studio Infinity v20.13 (Optimized) Running: http://localhost:${PORT}`));
+const server = app.listen(PORT, () => console.log(`Studio Infinity v20.13 (Optimized) Running: http://localhost:${PORT}`));
+// Large uploads (and converting non-web formats on import) can take longer than Node's
+// default 5 minute request timeout.
+server.requestTimeout = 2 * 60 * 60 * 1000;
