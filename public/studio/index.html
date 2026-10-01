@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Infinity · Timeline Studio</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/player/interactive-player.css">
+  <link rel="stylesheet" href="/studio/styles.css">
+  <script src="/vendor/vue/vue.global.prod.js"></script>
+  <script src="/player/movie-compiler.js"></script>
+</head>
+<body>
+<div id="app" v-cloak>
+  <div class="studio" @dragover.prevent @drop.prevent>
+
+    <!-- ============ Top bar ============ -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">&infin;</span>
+        <span class="brand-name">Video Infinity</span>
+        <span class="brand-sub">Timeline Studio</span>
+      </div>
+      <div class="project-picker">
+        <select :value="projectId" @change="openProject(Number($event.target.value))" aria-label="Project">
+          <option v-for="p in projects" :key="p.id" :value="p.id">{{ p.title }}</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" @click="createProject">+ New project</button>
+      </div>
+      <div class="save-state" :class="'is-' + saveState" :title="saveError">
+        <span class="save-dot"></span>{{ saveLabel }}
+        <button v-if="saveState === 'error'" class="link-btn" @click="saveNow">Retry</button>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn btn-ghost btn-sm" @click="settingsOpen = true" title="Movie settings" data-test="open-settings">Settings</button>
+        <a class="btn btn-ghost btn-sm" href="/classic" title="Branch graph, variables, analytics and the original tools">Classic tools</a>
+        <button class="btn btn-primary" @click="openExport" :disabled="!layout.items.length" data-test="open-export">Export movie</button>
+      </div>
+    </header>
+
+    <!-- ============ Media bin ============ -->
+    <aside class="bin" :class="{ 'is-dropping': binDrop }"
+           @dragenter.prevent="onBinDragEnter" @dragover.prevent="onBinDragOver"
+           @dragleave="onBinDragLeave" @drop.prevent.stop="onBinDrop">
+      <div class="panel-head">
+        <h2>Media</h2>
+        <button class="btn btn-primary btn-sm" @click="$refs.fileInput.click()" data-test="upload-button">Upload video</button>
+        <input ref="fileInput" type="file" accept="video/*,.mkv,.avi,.mov,.m4v" multiple hidden @change="onFilesPicked" data-test="file-input">
+      </div>
+
+      <div v-if="uploads.length" class="uploads">
+        <div v-for="u in uploads" :key="u.id" class="upload" :class="'is-' + u.status">
+          <div class="upload-top">
+            <span class="upload-name" :title="u.name">{{ u.name }}</span>
+            <button v-if="u.status === 'error' || u.status === 'done'" class="icon-btn" @click="dismissUpload(u)" aria-label="Dismiss">&times;</button>
+          </div>
+          <div class="upload-bar"><div class="upload-fill" :style="{ transform: 'scaleX(' + u.progress + ')' }"></div></div>
+          <div class="upload-status">{{ uploadStatusText(u) }}</div>
+        </div>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button role="tab" :class="{ active: binTab === 'videos' }" @click="binTab = 'videos'" data-test="tab-videos">
+          Videos <span class="count">{{ sourceClips.length }}</span>
+        </button>
+        <button role="tab" :class="{ active: binTab === 'clips' }" @click="binTab = 'clips'" data-test="tab-clips">
+          Clips <span class="count">{{ cutClips.length }}</span>
+        </button>
+      </div>
+
+      <div class="bin-list">
+        <div v-if="!binItems.length" class="bin-empty">
+          <template v-if="binTab === 'videos'">
+            <div class="bin-empty-icon">&#8679;</div>
+            <strong>No videos yet</strong>
+            <span>Drop video files here or click <b>Upload video</b>.</span>
+          </template>
+          <template v-else>
+            <div class="bin-empty-icon">&#9986;</div>
+            <strong>No clips yet</strong>
+            <span>Open the <b>Videos</b> tab and press <b>&#9986; Cut</b> to make clips. Whole videos can go on the timeline too.</span>
+          </template>
+        </div>
+        <div v-for="clip in binItems" :key="clip.unique_id" class="media-card" draggable="true"
+             :data-clip-id="clip.unique_id"
+             @dragstart="onMediaDragStart($event, clip)" @dragend="onMediaDragEnd" @dblclick="appendClip(clip)">
+          <div class="media-thumb" :style="thumbStyle(clip)">
+            <span class="media-duration">{{ fmt(clip.duration) }}</span>
+            <span v-if="usageCount(clip.unique_id)" class="media-used" title="Used on the timeline">In movie</span>
+          </div>
+          <div class="media-body">
+            <div class="media-name" :title="displayName(clip)">{{ displayName(clip) }}</div>
+            <div class="media-actions">
+              <button class="chip-btn" @click="appendClip(clip)" title="Add to the end of the main movie" data-test="add-to-timeline">+ Timeline</button>
+              <button class="chip-btn chip-choice" @click="useAsChoice(clip)" :title="choiceButtonTitle" data-test="use-as-choice">&#9670; Choice</button>
+              <button v-if="isSource(clip)" class="chip-btn" @click="openCutter(clip)" title="Cut a new clip from this video" data-test="cut-clip">&#9986; Cut</button>
+              <button class="chip-btn" :class="{ 'chip-on': captionsFor(clip.unique_id) }" @click="attachCaptions(clip)" :title="captionsFor(clip.unique_id) ? 'Captions: ' + captionsFor(clip.unique_id).filename + ' (click to replace)' : 'Attach an SRT or WebVTT caption file'" data-test="attach-captions">CC</button>
+              <span class="spacer"></span>
+              <button class="icon-btn" @click="renameClip(clip)" title="Rename" aria-label="Rename"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+              <button class="icon-btn danger" @click="deleteClip(clip)" title="Delete" aria-label="Delete"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 7h15M10 11v6M14 11v6M6.5 7l.8 11.2A2 2 0 0 0 9.3 20h5.4a2 2 0 0 0 2-1.8L17.5 7M9 7V4.5h6V7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="bin-drop-hint">Drop videos to upload</div>
+    </aside>
+
+    <!-- ============ Program monitor ============ -->
+    <main class="monitor-wrap">
+      <div class="monitor" ref="monitor" data-test="monitor"></div>
+      <div v-if="!layout.items.length && !loading" class="monitor-empty">
+        <div class="monitor-empty-inner">
+          <h3>Build your interactive movie</h3>
+          <ol>
+            <li><b>Upload</b> videos in the Media panel.</li>
+            <li><b>Cut</b> them into clips with &#9986; (optional).</li>
+            <li><b>Add</b> clips to the <em>Main movie</em> track &mdash; they play back to back.</li>
+            <li><b>Add a choice</b> with &#9670;. Each option plays its own clip, then the movie carries on from where it paused.</li>
+            <li><b>Export</b> one playable movie.</li>
+          </ol>
+        </div>
+      </div>
+    </main>
+
+    <!-- ============ Inspector ============ -->
+    <aside class="inspector">
+      <!-- Choice point -->
+      <template v-if="selectedPoint">
+        <div class="panel-head">
+          <h2><span class="diamond"></span> Choice point</h2>
+          <button class="icon-btn danger" @click="removePoint(selectedPoint.id)" title="Delete choice" aria-label="Delete choice" data-test="delete-choice"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 7h15M10 11v6M14 11v6M6.5 7l.8 11.2A2 2 0 0 0 9.3 20h5.4a2 2 0 0 0 2-1.8L17.5 7M9 7V4.5h6V7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="inspector-body">
+          <div class="field">
+            <label>Appears at</label>
+            <div class="row">
+              <input type="number" min="0" step="0.1" class="input input-time" :value="selectedPointTime.toFixed(1)"
+                     @change="movePointTo(selectedPoint.id, Number($event.target.value))" data-test="choice-time">
+              <span class="unit">sec</span>
+              <button class="btn btn-ghost btn-sm" @click="movePointTo(selectedPoint.id, playhead)">Use playhead</button>
+              <button class="btn btn-ghost btn-sm" @click="previewPoint(selectedPoint)" title="Play from 2 seconds before this choice">&#9654; Test</button>
+            </div>
+            <div class="hint">During <b>{{ displayName(selectedPointEntry.clip) }}</b> at {{ fmtPrecise(selectedPoint.at) }}</div>
+          </div>
+
+          <div class="field">
+            <label for="choice-prompt">Question for viewers</label>
+            <input id="choice-prompt" class="input" v-model="selectedPoint.prompt" maxlength="160" placeholder="What happens next?"
+                   @focus="beginEdit" @change="endEdit" data-test="choice-prompt">
+          </div>
+
+          <div class="field">
+            <label>Options <span class="muted">({{ selectedPoint.options.length }}/6)</span></label>
+            <div class="options">
+              <div v-for="(opt, i) in selectedPoint.options" :key="opt.id" class="option-card" :class="{ 'is-missing': !opt.clipId && opt.then.type === 'continue' }" :data-test="'option-' + i">
+                <div class="option-thumb" :style="thumbStyle(clipMap.get(opt.clipId))">
+                  <span class="option-key">{{ i + 1 }}</span>
+                  <span v-if="opt.then.type === 'jump'" class="option-kind" title="Jumps to a marker">&#9197;</span>
+                  <span v-else-if="opt.then.type === 'end'" class="option-kind" title="Ends the movie">&#9873;</span>
+                </div>
+                <div class="option-fields">
+                  <div class="row">
+                    <input class="input input-sm" v-model="opt.label" maxlength="80" :placeholder="opt.clipId ? displayName(clipMap.get(opt.clipId)) : 'Button text'"
+                           @focus="beginEdit" @change="endEdit" data-test="option-label">
+                    <input type="color" class="color" v-model="opt.color" @focus="beginEdit" @change="endEdit" title="Text colour">
+                    <button class="icon-btn" @click="removeOption(selectedPoint, opt.id)" title="Remove option" aria-label="Remove option">&times;</button>
+                  </div>
+                  <select class="input input-sm" :value="opt.clipId || ''" @change="setOptionClip(selectedPoint, opt, $event.target.value)" data-test="option-clip">
+                    <option value="">&mdash; No clip (uses the action below) &mdash;</option>
+                    <optgroup label="Clips" v-if="cutClips.length">
+                      <option v-for="c in cutClips" :key="c.unique_id" :value="c.unique_id">{{ displayName(c) }} ({{ fmt(c.duration) }})</option>
+                    </optgroup>
+                    <optgroup label="Whole videos" v-if="sourceClips.length">
+                      <option v-for="c in sourceClips" :key="c.unique_id" :value="c.unique_id">{{ displayName(c) }} ({{ fmt(c.duration) }})</option>
+                    </optgroup>
+                  </select>
+                  <div class="row option-then">
+                    <span class="muted small">Then</span>
+                    <select class="input input-sm" :value="opt.then.type" @change="setOptionThen(selectedPoint, opt, $event.target.value)" data-test="option-then">
+                      <option value="continue">Back to the movie</option>
+                      <option value="jump">Jump to marker</option>
+                      <option value="end">End the movie</option>
+                    </select>
+                    <select v-if="opt.then.type === 'jump'" class="input input-sm" :value="opt.then.targetId || ''" @change="setOptionJumpTarget(selectedPoint, opt, $event.target.value)" data-test="option-jump-target">
+                      <option value="">&mdash; marker &mdash;</option>
+                      <option v-for="m in chapterMarkers" :key="m.id" :value="m.id">{{ m.label || 'Marker' }} ({{ fmtPrecise(markerTime(m)) }})</option>
+                    </select>
+                    <input v-if="opt.then.type === 'end'" class="input input-sm" :value="opt.then.ending" maxlength="80" placeholder="Ending name"
+                           @focus="beginEdit" @change="setOptionEnding(selectedPoint, opt, $event.target.value); endEdit()" data-test="option-ending">
+                  </div>
+                  <details class="option-more">
+                    <summary>Flags &amp; conditions</summary>
+                    <div class="option-more-body">
+                      <div class="row">
+                        <span class="muted small">Sets</span>
+                        <input class="input input-sm" :value="opt.setFlags.join(', ')" placeholder="e.g. has_key, met_anna"
+                               @focus="beginEdit" @change="setOptionFlags(selectedPoint, opt, $event.target.value); endEdit()" data-test="option-flags">
+                      </div>
+                      <div class="row">
+                        <span class="muted small">Needs</span>
+                        <input class="input input-sm" :value="opt.requires ? opt.requires.flag : ''" placeholder="flag (optional)"
+                               @focus="beginEdit" @change="setOptionRequires(selectedPoint, opt, $event.target.value); endEdit()" data-test="option-requires">
+                        <select v-if="opt.requires" class="input input-sm input-narrow" :value="opt.whenLocked" @change="setOptionWhenLocked(selectedPoint, opt, $event.target.value)">
+                          <option value="hide">Hide until set</option>
+                          <option value="lock">Show locked</option>
+                        </select>
+                      </div>
+                    </div>
+                  </details>
+                </div>
+              </div>
+              <button v-if="selectedPoint.options.length < 6" class="add-option" @click="addOption(selectedPoint)" data-test="add-option">+ Add option</button>
+            </div>
+            <div class="hint">Tip: with this choice selected, press <b>&#9670; Choice</b> on any clip in the Media panel to add it as an option.</div>
+          </div>
+
+          <div class="field">
+            <label>Timer</label>
+            <div class="row">
+              <input type="number" min="0" max="120" step="1" class="input input-time" :value="selectedPoint.timeout"
+                     @change="setPointField(selectedPoint, 'timeout', Math.max(0, Math.min(120, Number($event.target.value) || 0)))" data-test="choice-timeout">
+              <span class="unit">sec</span>
+              <span class="hint inline">{{ selectedPoint.timeout > 0 ? 'Viewers have ' + selectedPoint.timeout + 's to pick' : 'Off \u2014 waits for the viewer' }}</span>
+            </div>
+            <div v-if="selectedPoint.timeout > 0" class="row">
+              <span class="muted small">When time runs out</span>
+              <select class="input input-sm" :value="selectedPoint.defaultOptionId || ''" @change="setPointField(selectedPoint, 'defaultOptionId', $event.target.value || null)">
+                <option value="">Continue the movie</option>
+                <option v-for="(opt, i) in selectedPoint.options" :key="opt.id" :value="opt.id" :disabled="!opt.clipId && opt.then.type === 'continue'">Play option {{ i + 1 }}{{ opt.label ? ' \u2013 ' + opt.label : '' }}</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>While viewers decide</label>
+            <div class="row">
+              <select class="input input-sm" :value="selectedPoint.mode" @change="setPointField(selectedPoint, 'mode', $event.target.value)" data-test="choice-mode">
+                <option value="pause">Pause the movie</option>
+                <option value="play" :disabled="!(selectedPoint.timeout > 0)">Keep playing (needs a timer)</option>
+              </select>
+            </div>
+          </div>
+
+          <label class="toggle">
+            <input type="checkbox" :checked="selectedPoint.allowSkip" @change="setPointField(selectedPoint, 'allowSkip', $event.target.checked)">
+            <span>Show a <b>Continue watching</b> button so viewers can skip</span>
+          </label>
+
+          <div class="callout">
+            Viewers hover an option to preview its clip and click to play it. When that clip ends, the main movie resumes from this exact moment &mdash; unless the option jumps or ends the movie.
+          </div>
+        </div>
+      </template>
+
+      <!-- Marker -->
+      <template v-else-if="selectedMarker">
+        <div class="panel-head">
+          <h2><span class="marker-dot" :class="'is-' + selectedMarker.type"></span> {{ selectedMarker.type === 'chapter' ? 'Chapter' : selectedMarker.type === 'jump' ? 'Jump' : 'Ending' }} marker</h2>
+          <button class="icon-btn danger" @click="removeMarker(selectedMarker.id)" title="Delete marker" aria-label="Delete marker" data-test="delete-marker"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 7h15M10 11v6M14 11v6M6.5 7l.8 11.2A2 2 0 0 0 9.3 20h5.4a2 2 0 0 0 2-1.8L17.5 7M9 7V4.5h6V7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="inspector-body">
+          <div class="field">
+            <label>Type</label>
+            <div class="seg">
+              <button v-for="t in ['chapter', 'jump', 'end']" :key="t" class="seg-btn" :class="{ active: selectedMarker.type === t }" @click="setMarkerType(selectedMarker, t)" :data-test="'marker-type-' + t">{{ t === 'chapter' ? 'Chapter' : t === 'jump' ? 'Jump' : 'Ending' }}</button>
+            </div>
+            <div class="hint">{{ selectedMarker.type === 'chapter' ? 'A named point viewers can jump to from the chapters menu.' : selectedMarker.type === 'jump' ? 'When the movie reaches this point it jumps to another marker.' : 'When the movie reaches this point it ends.' }}</div>
+          </div>
+          <div class="field">
+            <label>At</label>
+            <div class="row">
+              <input type="number" min="0" step="0.1" class="input input-time" :value="selectedMarkerTime.toFixed(1)"
+                     @change="moveMarkerTo(selectedMarker.id, Number($event.target.value))" data-test="marker-time">
+              <span class="unit">sec</span>
+              <button class="btn btn-ghost btn-sm" @click="moveMarkerTo(selectedMarker.id, playhead)">Use playhead</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="marker-label">Label</label>
+            <input id="marker-label" class="input" v-model="selectedMarker.label" maxlength="60" :placeholder="selectedMarker.type === 'end' ? 'Ending name' : 'Marker name'"
+                   @focus="beginEdit" @change="endEdit" data-test="marker-label">
+          </div>
+          <div v-if="selectedMarker.type === 'jump'" class="field">
+            <label>Jump to</label>
+            <select class="input input-sm" :value="selectedMarker.targetId || ''" @change="setMarkerTarget(selectedMarker, $event.target.value)" data-test="marker-target">
+              <option value="">&mdash; choose a chapter marker &mdash;</option>
+              <option v-for="m in chapterMarkers.filter(x => x.id !== selectedMarker.id)" :key="m.id" :value="m.id">{{ m.label || 'Marker' }} ({{ fmtPrecise(markerTime(m)) }})</option>
+            </select>
+          </div>
+          <div v-if="selectedMarker.type === 'end'" class="field">
+            <label for="marker-ending">Ending name</label>
+            <input id="marker-ending" class="input" v-model="selectedMarker.ending" maxlength="80" placeholder="e.g. The good ending"
+                   @focus="beginEdit" @change="endEdit" data-test="marker-ending">
+          </div>
+          <div v-if="selectedMarker.type !== 'chapter'" class="field">
+            <label>Only when</label>
+            <div class="row">
+              <input class="input input-sm" :value="selectedMarker.condition ? selectedMarker.condition.flag : ''" placeholder="flag (optional)"
+                     @focus="beginEdit" @change="setMarkerCondition(selectedMarker, $event.target.value); endEdit()" data-test="marker-condition">
+            </div>
+            <div class="hint">Leave empty to always {{ selectedMarker.type === 'jump' ? 'jump' : 'end' }}. Set a flag name to only do it when that flag was set by an earlier choice.</div>
+          </div>
+        </div>
+      </template>
+
+      <!-- Title overlay -->
+      <template v-else-if="selectedOverlay">
+        <div class="panel-head">
+          <h2><span class="overlay-dot"></span> Title</h2>
+          <button class="icon-btn danger" @click="removeOverlay(selectedOverlay.id)" title="Delete title" aria-label="Delete title" data-test="delete-overlay"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 7h15M10 11v6M14 11v6M6.5 7l.8 11.2A2 2 0 0 0 9.3 20h5.4a2 2 0 0 0 2-1.8L17.5 7M9 7V4.5h6V7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="inspector-body">
+          <div class="field">
+            <label for="overlay-text">Text</label>
+            <textarea id="overlay-text" class="input input-area" v-model="selectedOverlay.text" maxlength="300" rows="3" placeholder="Three days later\u2026"
+                      @focus="beginEdit" @change="endEdit" data-test="overlay-text"></textarea>
+          </div>
+          <div class="field">
+            <label>Timing</label>
+            <div class="row">
+              <input type="number" min="0" step="0.1" class="input input-time" :value="selectedOverlayTime.toFixed(1)"
+                     @change="moveOverlayTo(selectedOverlay.id, Number($event.target.value))" data-test="overlay-time">
+              <span class="unit">from</span>
+              <input type="number" min="0.5" max="600" step="0.5" class="input input-time" :value="selectedOverlay.duration"
+                     @change="setOverlayDuration(selectedOverlay, Number($event.target.value))" data-test="overlay-duration">
+              <span class="unit">sec</span>
+              <button class="btn btn-ghost btn-sm" @click="moveOverlayTo(selectedOverlay.id, playhead)">Use playhead</button>
+            </div>
+          </div>
+          <div class="field">
+            <label>Position</label>
+            <div class="seg">
+              <button v-for="pos in ['top', 'center', 'lower', 'bottom']" :key="pos" class="seg-btn" :class="{ active: selectedOverlay.position === pos }" @click="setOverlayPosition(selectedOverlay, pos)" :data-test="'overlay-pos-' + pos">{{ pos[0].toUpperCase() + pos.slice(1) }}</button>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- Timeline clip -->
+      <template v-else-if="selectedItemEntry">
+        <div class="panel-head">
+          <h2>Clip on timeline</h2>
+          <button class="icon-btn danger" @click="removeItem(selectedItemEntry.item.id)" title="Remove from timeline" aria-label="Remove from timeline" data-test="remove-item"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 7h15M10 11v6M14 11v6M6.5 7l.8 11.2A2 2 0 0 0 9.3 20h5.4a2 2 0 0 0 2-1.8L17.5 7M9 7V4.5h6V7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="inspector-body">
+          <div class="item-preview" :style="thumbStyle(selectedItemEntry.clip)"></div>
+          <div class="item-title">{{ displayName(selectedItemEntry.clip) }}</div>
+          <div class="kv">
+            <span>Position</span><b>{{ selectedItemIndex + 1 }} of {{ layout.items.length }}</b>
+            <span>Starts at</span><b>{{ fmtPrecise(selectedItemEntry.start) }}</b>
+            <span>Length</span><b>{{ fmtPrecise(selectedItemEntry.duration) }}<template v-if="selectedItemEntry.trimmed"> (trimmed)</template></b>
+            <span>Choices in clip</span><b>{{ pointsInItem(selectedItemEntry.item.id).length }}</b>
+          </div>
+
+          <div class="field">
+            <label>Trim on the timeline</label>
+            <div class="row">
+              <span class="muted small">In</span>
+              <input type="number" min="0" step="0.1" class="input input-time" :value="selectedItemEntry.item.in.toFixed(1)"
+                     @change="setItemTrim(selectedItemEntry.item, 'in', Number($event.target.value))" data-test="item-trim-in">
+              <span class="muted small">Out</span>
+              <input type="number" min="0" step="0.1" class="input input-time" :value="(selectedItemEntry.item.out === null ? selectedItemEntry.clip.duration : selectedItemEntry.item.out).toFixed(1)"
+                     @change="setItemTrim(selectedItemEntry.item, 'out', Number($event.target.value))" data-test="item-trim-out">
+              <button v-if="selectedItemEntry.trimmed" class="btn btn-ghost btn-sm" @click="resetItemTrim(selectedItemEntry.item)" data-test="item-trim-reset">Reset</button>
+            </div>
+            <div class="hint">Plays {{ fmtPrecise(selectedItemEntry.item.in) }} &ndash; {{ fmtPrecise(selectedItemEntry.item.out === null ? selectedItemEntry.clip.duration : selectedItemEntry.item.out) }} of the {{ fmtPrecise(selectedItemEntry.clip.duration) }} clip. Choices, markers and titles stay on their frame.</div>
+          </div>
+
+          <div class="field">
+            <label>Captions</label>
+            <div class="row" v-if="captionsFor(selectedItemEntry.clipId)">
+              <span class="chip-static">CC &middot; {{ captionsFor(selectedItemEntry.clipId).filename }}</span>
+              <button class="btn btn-ghost btn-sm" @click="attachCaptions(selectedItemEntry.clip)">Replace</button>
+              <button class="btn btn-ghost btn-sm" @click="removeCaptions(selectedItemEntry.clip)" data-test="remove-captions">Remove</button>
+            </div>
+            <button v-else class="btn btn-ghost btn-sm btn-block" @click="attachCaptions(selectedItemEntry.clip)" data-test="attach-captions-item">Attach SRT / WebVTT captions</button>
+          </div>
+
+          <div class="btn-grid">
+            <button class="btn btn-ghost btn-sm" :disabled="selectedItemIndex === 0" @click="moveItem(selectedItemEntry.item.id, -1)">&#9664; Move earlier</button>
+            <button class="btn btn-ghost btn-sm" :disabled="selectedItemIndex === layout.items.length - 1" @click="moveItem(selectedItemEntry.item.id, 1)">Move later &#9654;</button>
+            <button class="btn btn-ghost btn-sm" @click="duplicateItem(selectedItemEntry.item.id)">Duplicate</button>
+            <button class="btn btn-ghost btn-sm" @click="renameClip(selectedItemEntry.clip)">Rename clip</button>
+          </div>
+          <button class="btn btn-choice btn-block" @click="addChoiceInItem(selectedItemEntry)" data-test="add-choice-in-clip">&#9670; Add a choice in this clip</button>
+          <div class="btn-grid">
+            <button class="btn btn-ghost btn-sm" @click="addMarkerInItem(selectedItemEntry, 'chapter')" data-test="add-chapter">&#9679; Chapter here</button>
+            <button class="btn btn-ghost btn-sm" @click="addMarkerInItem(selectedItemEntry, 'jump')" data-test="add-jump">&#9197; Jump here</button>
+            <button class="btn btn-ghost btn-sm" @click="addMarkerInItem(selectedItemEntry, 'end')" data-test="add-end">&#9873; Ending here</button>
+            <button class="btn btn-ghost btn-sm" @click="addOverlayInItem(selectedItemEntry)" data-test="add-title">T Title here</button>
+          </div>
+          <div v-if="pointsInItem(selectedItemEntry.item.id).length" class="mini-list">
+            <button v-for="pl in pointsInItem(selectedItemEntry.item.id)" :key="pl.point.id" class="mini-row" @click="selectPoint(pl.point.id)">
+              <span class="diamond small"></span>
+              <span class="mini-time">{{ fmtPrecise(pl.time) }}</span>
+              <span class="mini-text">{{ pl.point.prompt || 'Choice' }} &middot; {{ pl.point.options.length }} option{{ pl.point.options.length === 1 ? '' : 's' }}</span>
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- Overview -->
+      <template v-else>
+        <div class="panel-head"><h2>Movie</h2></div>
+        <div class="inspector-body">
+          <div class="stats">
+            <div class="stat"><b>{{ fmt(totalDuration) }}</b><span>Main movie</span></div>
+            <div class="stat"><b>{{ layout.items.length }}</b><span>Clips</span></div>
+            <div class="stat"><b>{{ timeline.choicePoints.length }}</b><span>Choices</span></div>
+            <div class="stat"><b>{{ timeline.markers.length + timeline.overlays.length }}</b><span>Markers &amp; titles</span></div>
+          </div>
+          <div class="checklist">
+            <div class="check" :class="{ done: clips.length > 0 }"><span class="check-box"></span>Upload a video</div>
+            <div class="check" :class="{ done: layout.items.length > 0 }"><span class="check-box"></span>Put clips on the main movie track</div>
+            <div class="check" :class="{ done: timeline.choicePoints.length > 0 }"><span class="check-box"></span>Add a choice point (&#9670; or press C)</div>
+            <div class="check" :class="{ done: !issues.length }"><span class="check-box"></span>Story check passes</div>
+            <div class="check"><span class="check-box"></span>Export the movie</div>
+          </div>
+          <div v-if="issues.length" class="issues">
+            <div class="issues-title">Story check</div>
+            <button v-for="(issue, i) in issues" :key="i" class="issue" :class="'is-' + issue.severity" @click="goToIssue(issue)" :title="issue.code">
+              <span class="issue-badge">{{ issue.severity === 'error' ? '!' : issue.severity === 'warning' ? '&#9888;' : 'i' }}</span>{{ issue.message }}
+            </button>
+          </div>
+          <div class="shortcuts">
+            <div class="shortcuts-title">Shortcuts</div>
+            <div><kbd>Space</kbd> Play / pause</div>
+            <div><kbd>C</kbd> Add a choice at the playhead</div>
+            <div><kbd>M</kbd> Add a chapter marker &middot; <kbd>T</kbd> Add a title</div>
+            <div><kbd>Del</kbd> Delete the selection</div>
+            <div><kbd>Ctrl</kbd>+<kbd>Z</kbd> Undo &middot; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> Redo</div>
+            <div><kbd>&larr;</kbd> <kbd>&rarr;</kbd> Move the playhead</div>
+          </div>
+        </div>
+      </template>
+    </aside>
+
+    <!-- ============ Timeline ============ -->
+    <section class="timeline-panel">
+      <div class="tl-toolbar">
+        <button class="btn btn-icon" @click="togglePlay" :title="playerState === 'playing' || playerState === 'option' ? 'Pause' : 'Play'" data-test="tl-play">
+          <span v-if="playerState === 'playing' || playerState === 'option'"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></svg></span><span v-else><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg></span>
+        </button>
+        <span class="tl-time">{{ fmtPrecise(playhead) }} <span class="muted">/ {{ fmtPrecise(totalDuration) }}</span></span>
+        <span class="tl-sep"></span>
+        <button class="btn btn-choice btn-sm" @click="addChoiceAtPlayhead" :disabled="!layout.items.length" title="Add a choice at the playhead (C)" data-test="add-choice">&#9670; Add choice at playhead</button>
+        <button class="btn btn-ghost btn-sm" @click="addMarkerAtPlayhead('chapter')" :disabled="!layout.items.length" title="Add a chapter marker at the playhead (M)" data-test="add-marker">&#9679; Marker</button>
+        <button class="btn btn-ghost btn-sm" @click="addOverlayAtPlayhead" :disabled="!layout.items.length" title="Add an on-screen title at the playhead (T)" data-test="add-title-tb">T Title</button>
+        <button class="btn btn-ghost btn-sm" @click="deleteSelection" :disabled="!selection" title="Delete selection (Del)">Delete</button>
+        <span class="tl-sep"></span>
+        <button class="btn btn-ghost btn-sm" @click="undo" :disabled="!history.past.length" title="Undo (Ctrl+Z)" data-test="undo">Undo</button>
+        <button class="btn btn-ghost btn-sm" @click="redo" :disabled="!history.future.length" title="Redo (Ctrl+Shift+Z)">Redo</button>
+        <span class="spacer"></span>
+        <label class="zoom">
+          <span class="muted small">Zoom</span>
+          <input type="range" min="0" max="100" step="1" :value="zoomValue" @input="setZoomFromSlider(Number($event.target.value))" aria-label="Timeline zoom">
+        </label>
+        <button class="btn btn-ghost btn-sm" @click="autoFit = true; fitTimeline()">Fit</button>
+      </div>
+
+      <div class="tl-body">
+        <div class="tl-labels" ref="tlLabels">
+          <div class="tl-label-ruler"></div>
+          <div class="tl-label" :style="{ height: mainTrackHeight + 'px' }"><span class="tl-swatch main"></span>Main movie</div>
+          <div class="tl-label" :style="{ height: choiceTrackHeight + 'px' }"><span class="tl-swatch choice"></span>Choices</div>
+          <div class="tl-label" :style="{ height: markerTrackHeight + 'px' }"><span class="tl-swatch marker"></span>Markers</div>
+          <div class="tl-label" :style="{ height: overlayTrackHeight + 'px' }"><span class="tl-swatch overlay"></span>Titles</div>
+        </div>
+
+        <div class="tl-scroll" ref="tlScroll" @wheel="onTimelineWheel" @scroll="onTimelineScroll">
+          <div class="tl-content" ref="tlContent" :style="{ width: contentWidth + 'px' }">
+            <div class="tl-ruler" @pointerdown="onRulerPointerDown" data-test="ruler">
+              <div v-for="tick in ticks" :key="tick.t" class="tl-tick" :style="{ left: tick.x + 'px' }"><span>{{ tick.label }}</span></div>
+            </div>
+
+            <!-- Main movie track -->
+            <div class="tl-track tl-main" :style="{ height: mainTrackHeight + 'px' }" data-test="main-track"
+                 @pointerdown.self="onTrackBackgroundPointerDown"
+                 @dragover="onMainTrackDragOver" @dragleave="onTrackDragLeave" @drop.prevent.stop="onMainTrackDrop">
+              <div v-if="!layout.items.length" class="tl-empty" :class="{ active: tlDrop && tlDrop.track === 'main' }">
+                Drag clips here &mdash; or press <b>+ Timeline</b> on any clip
+              </div>
+              <div v-for="(entry, index) in layout.items" :key="entry.item.id" class="tl-block"
+                   :class="{ selected: selection && selection.type === 'item' && selection.id === entry.item.id, dragging: drag && drag.kind === 'item' && drag.itemId === entry.item.id }"
+                   :style="blockStyle(entry)" :data-item-id="entry.item.id" :title="displayName(entry.clip) + ' \u2014 ' + fmtPrecise(entry.duration)"
+                   @pointerdown="onBlockPointerDown($event, entry)">
+                <div class="tl-block-label">
+                  <span class="tl-block-name">{{ displayName(entry.clip) }}</span>
+                  <span class="tl-block-dur">{{ fmt(entry.duration) }}</span>
+                </div>
+              </div>
+              <div v-if="dropMarkerX !== null" class="tl-insert" :style="{ left: dropMarkerX + 'px' }"></div>
+            </div>
+
+            <!-- Choice track -->
+            <div class="tl-track tl-choices" :style="{ height: choiceTrackHeight + 'px' }" data-test="choice-track"
+                 @pointerdown.self="onTrackBackgroundPointerDown"
+                 @dblclick.self="onChoiceTrackDblClick"
+                 @dragover="onChoiceTrackDragOver" @dragleave="onTrackDragLeave" @drop.prevent.stop="onChoiceTrackDrop">
+              <div v-if="layout.items.length && !timeline.choicePoints.length" class="tl-hint">
+                Double-click here, press <b>C</b>, or drag a clip onto this track to add a choice
+              </div>
+              <div v-for="pl in pointsLayout" :key="pl.point.id" class="tl-point"
+                   :class="{ selected: selection && selection.type === 'choice' && selection.id === pl.point.id, 'drop-target': tlDrop && tlDrop.pointId === pl.point.id, live: livePointId === pl.point.id }"
+                   :style="{ left: (pl.time * pps) + 'px' }" :data-point-id="pl.point.id">
+                <button class="tl-diamond" @pointerdown.stop="onMarkerPointerDown($event, pl)" :title="(pl.point.prompt || 'Choice') + ' at ' + fmtPrecise(pl.time) + ' \u2014 drag to move'" :aria-label="'Choice at ' + fmtPrecise(pl.time)"></button>
+                <div class="tl-options" @pointerdown.stop="selectPoint(pl.point.id)">
+                  <div v-for="(opt, i) in pl.point.options" :key="opt.id" class="tl-option" :class="{ missing: !opt.clipId }"
+                       :style="optionChipStyle(opt)" :title="optionTitle(opt, i)">
+                    <span class="tl-option-thumb" :style="thumbStyle(clipMap.get(opt.clipId))"></span>
+                    <span class="tl-option-label">{{ opt.label || (opt.clipId ? displayName(clipMap.get(opt.clipId)) : 'Pick a clip') }}</span>
+                  </div>
+                  <div v-if="!pl.point.options.length" class="tl-option missing">No options</div>
+                </div>
+              </div>
+              <div v-if="tlDrop && tlDrop.track === 'choice' && !tlDrop.pointId" class="tl-ghost-point" :style="{ left: (tlDrop.time * pps) + 'px' }"></div>
+            </div>
+
+            <!-- Markers track -->
+            <div class="tl-track tl-markers" :style="{ height: markerTrackHeight + 'px' }" data-test="marker-track"
+                 @pointerdown.self="onTrackBackgroundPointerDown"
+                 @dblclick.self="onMarkerTrackDblClick">
+              <div v-if="layout.items.length && !timeline.markers.length" class="tl-hint">Double-click or press <b>M</b> to add a chapter marker</div>
+              <div v-for="ml in markersLayout" :key="ml.marker.id" class="tl-marker"
+                   :class="['is-' + ml.marker.type, { selected: selection && selection.type === 'marker' && selection.id === ml.marker.id }]"
+                   :style="{ left: (ml.time * pps) + 'px' }" :data-marker-id="ml.marker.id">
+                <button class="tl-marker-dot" @pointerdown.stop="onMarkerDotPointerDown($event, ml)"
+                        :title="(ml.marker.label || ml.marker.type) + ' at ' + fmtPrecise(ml.time) + ' \u2014 drag to move'"
+                        :aria-label="ml.marker.type + ' marker at ' + fmtPrecise(ml.time)"></button>
+                <span class="tl-marker-label" @pointerdown.stop="selectMarker(ml.marker.id)">{{ ml.marker.label || ml.marker.type }}</span>
+              </div>
+            </div>
+
+            <!-- Titles track -->
+            <div class="tl-track tl-overlays" :style="{ height: overlayTrackHeight + 'px' }" data-test="overlay-track"
+                 @pointerdown.self="onTrackBackgroundPointerDown"
+                 @dblclick.self="onOverlayTrackDblClick">
+              <div v-if="layout.items.length && !timeline.overlays.length" class="tl-hint">Double-click or press <b>T</b> to add an on-screen title</div>
+              <div v-for="ol in overlaysLayout" :key="ol.overlay.id" class="tl-overlay"
+                   :class="{ selected: selection && selection.type === 'overlay' && selection.id === ol.overlay.id }"
+                   :style="{ left: (ol.start * pps) + 'px', width: Math.max(30, (ol.end - ol.start) * pps) + 'px' }"
+                   :title="ol.overlay.text + ' (' + fmtPrecise(ol.start) + ' \u2013 ' + fmtPrecise(ol.end) + ')'"
+                   @pointerdown.stop="selectOverlay(ol.overlay.id)" data-test="overlay-block">
+                <span class="tl-overlay-text">{{ ol.overlay.text || 'Title' }}</span>
+              </div>
+            </div>
+
+            <!-- Choice lines across the main track -->
+            <div v-for="pl in pointsLayout" :key="'line-' + pl.point.id" class="tl-point-line"
+                 :class="{ selected: selection && selection.type === 'choice' && selection.id === pl.point.id }"
+                 :style="{ left: (pl.time * pps) + 'px', height: mainTrackHeight + 'px' }"></div>
+
+            <div class="tl-playhead" :style="{ transform: 'translateX(' + (playhead * pps) + 'px)' }">
+              <div class="tl-playhead-head" @pointerdown="onRulerPointerDown"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ Cutter ============ -->
+    <div v-if="cutter.open" class="modal-backdrop" @pointerdown.self="closeCutter">
+      <div class="modal modal-wide" role="dialog" aria-modal="true" aria-label="Create a clip" data-test="cutter">
+        <div class="modal-head">
+          <h3>&#9986; Create a clip</h3>
+          <button class="icon-btn" @click="closeCutter" aria-label="Close">&times;</button>
+        </div>
+        <div class="cutter">
+          <div class="row">
+            <label class="muted small">Source</label>
+            <select class="input" :value="cutter.videoId" @change="changeCutterVideo(Number($event.target.value))">
+              <option v-for="v in videos" :key="v.id" :value="v.id">{{ v.filename }} ({{ fmt(v.duration) }})</option>
+            </select>
+          </div>
+          <div class="cutter-video">
+            <video ref="cutterVideo" v-if="cutterVideo" :src="cutterVideo.filepath" preload="auto" playsinline
+                   @timeupdate="onCutterTimeUpdate" @play="cutter.playing = true" @pause="cutter.playing = false"
+                   @loadedmetadata="onCutterLoaded" @click="toggleCutterPlay"></video>
+          </div>
+          <div class="trim" ref="trimBar" @pointerdown="onTrimPointerDown($event, 'seek')">
+            <div class="trim-range" :style="{ left: pct(cutter.in) + '%', width: (pct(cutter.out) - pct(cutter.in)) + '%' }"></div>
+            <div class="trim-handle in" :style="{ left: pct(cutter.in) + '%' }" @pointerdown.stop="onTrimPointerDown($event, 'in')" title="Drag to set IN"></div>
+            <div class="trim-handle out" :style="{ left: pct(cutter.out) + '%' }" @pointerdown.stop="onTrimPointerDown($event, 'out')" title="Drag to set OUT"></div>
+            <div class="trim-playhead" :style="{ left: pct(cutter.current) + '%' }"></div>
+          </div>
+          <div class="cutter-controls">
+            <button class="btn btn-icon" @click="toggleCutterPlay" :title="cutter.playing ? 'Pause' : 'Play'">
+              <span v-if="cutter.playing"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></svg></span><span v-else><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg></span>
+            </button>
+            <span class="tl-time">{{ fmtPrecise(cutter.current) }}</span>
+            <span class="tl-sep"></span>
+            <button class="btn btn-ghost btn-sm" @click="setCutterIn()" title="Set IN at the current frame (I)">Set IN</button>
+            <input type="number" class="input input-time" min="0" step="0.1" :value="cutter.in.toFixed(1)" @change="setCutterIn(Number($event.target.value))" aria-label="IN (seconds)" data-test="cutter-in">
+            <button class="btn btn-ghost btn-sm" @click="setCutterOut()" title="Set OUT at the current frame (O)">Set OUT</button>
+            <input type="number" class="input input-time" min="0" step="0.1" :value="cutter.out.toFixed(1)" @change="setCutterOut(Number($event.target.value))" aria-label="OUT (seconds)" data-test="cutter-out">
+            <span class="muted small">Length <b class="text">{{ fmtPrecise(Math.max(0, cutter.out - cutter.in)) }}</b></span>
+            <span class="spacer"></span>
+            <button class="btn btn-ghost btn-sm" @click="playSelection">&#9654; Play selection</button>
+          </div>
+          <div class="row">
+            <input class="input" v-model="cutter.name" @input="cutter.nameTouched = true" maxlength="200" placeholder="Clip name" data-test="cutter-name">
+            <label class="toggle compact"><input type="checkbox" v-model="cutter.addToTimeline"> <span>Add to the main movie</span></label>
+          </div>
+          <div v-if="cutter.error" class="form-error">{{ cutter.error }}</div>
+        </div>
+        <div class="modal-foot">
+          <span class="muted small">Shortcuts: <kbd>I</kbd> set IN &middot; <kbd>O</kbd> set OUT &middot; <kbd>Space</kbd> play</span>
+          <span class="spacer"></span>
+          <button class="btn btn-ghost" @click="closeCutter">Cancel</button>
+          <button class="btn btn-primary" @click="createClip" :disabled="cutter.busy || cutter.out - cutter.in < 0.1" data-test="cutter-create">
+            {{ cutter.busy ? 'Cutting\u2026' : 'Create clip' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ Settings ============ -->
+    <div v-if="settingsOpen" class="modal-backdrop" @pointerdown.self="settingsOpen = false">
+      <div class="modal" role="dialog" aria-modal="true" aria-label="Movie settings" data-test="settings-modal">
+        <div class="modal-head">
+          <h3>Movie settings</h3>
+          <button class="icon-btn" @click="settingsOpen = false" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <label class="toggle">
+            <input type="checkbox" v-model="timeline.settings.allowSeek" @change="pushSettingsEdit">
+            <span><b>Let viewers seek</b> through the movie with the progress bar</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" v-model="timeline.settings.showChapters" @change="pushSettingsEdit">
+            <span><b>Show chapters</b> &mdash; a badge during playback and a chapters menu</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" v-model="timeline.settings.rememberProgress" @change="pushSettingsEdit">
+            <span><b>Remember progress</b> &mdash; viewers can close the movie and resume where they left off (in exports)</span>
+          </label>
+        </div>
+        <div class="modal-foot">
+          <span class="spacer"></span>
+          <button class="btn btn-primary" @click="settingsOpen = false">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ Export ============ -->
+    <div v-if="exporter.open" class="modal-backdrop" @pointerdown.self="closeExport">
+      <div class="modal" role="dialog" aria-modal="true" aria-label="Export movie" data-test="export-modal">
+        <div class="modal-head">
+          <h3>Export movie</h3>
+          <button class="icon-btn" @click="closeExport" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="muted small">Stitches the {{ layout.items.length }} clip{{ layout.items.length === 1 ? '' : 's' }} on the main track into one video and packages {{ exportOptionClipCount }} choice clip{{ exportOptionClipCount === 1 ? '' : 's' }} with a player that pauses for choices, previews options on hover and resumes where it left off.</p>
+          <div class="field">
+            <label for="export-title">Title</label>
+            <input id="export-title" class="input" v-model="exporter.title" maxlength="200" data-test="export-title">
+          </div>
+          <div class="field">
+            <label for="export-res">Resolution</label>
+            <select id="export-res" class="input" v-model="exporter.resolution">
+              <option value="auto">Match the first clip (max 1080p)</option>
+              <option value="1080p">1080p</option>
+              <option value="720p">720p</option>
+              <option value="480p">480p (smaller files)</option>
+            </select>
+          </div>
+          <div v-if="exporter.stats" class="export-stats">
+            <span>{{ fmt(exporter.stats.duration) }} movie</span><span>{{ exporter.stats.clips }} clips</span><span>{{ exporter.stats.choices }} choices</span><span>{{ exporter.stats.endings }} ending{{ exporter.stats.endings === 1 ? '' : 's' }}</span>
+          </div>
+          <div v-if="issues.length" class="callout warn">
+            {{ issueSummary }} Options without a clip and choices without options are skipped in the export.
+          </div>
+          <div v-else class="callout ok">Story check passed &mdash; every part of the movie is reachable and it can end.</div>
+
+          <div v-if="exporter.job" class="job" :class="'is-' + exporter.job.status" data-test="export-job">
+            <div class="job-top">
+              <span>{{ exporter.job.status === 'done' ? 'Your movie is ready' : exporter.job.stage }}</span>
+              <span>{{ Math.round((exporter.job.progress || 0) * 100) }}%</span>
+            </div>
+            <div class="upload-bar"><div class="upload-fill" :style="{ transform: 'scaleX(' + (exporter.job.progress || 0) + ')' }"></div></div>
+            <div v-if="exporter.job.status === 'done'" class="job-done">
+              <a class="btn btn-primary" :href="exporter.job.url" target="_blank" rel="noopener" data-test="export-open">&#9654; Open movie</a>
+              <button class="btn btn-ghost" @click="copyLink(exporter.job.url)">Copy link</button>
+              <div class="hint">Saved to <code>public/exports/{{ exporter.job.exportName }}/</code>. Upload that folder to any static host (Netlify, GitHub Pages, S3&hellip;) to share it.</div>
+            </div>
+          </div>
+          <div v-if="exporter.error" class="form-error">{{ exporter.error }}</div>
+
+          <div v-if="exporter.exports.length" class="exports">
+            <div class="muted small">Recent exports</div>
+            <a v-for="ex in exporter.exports" :key="ex.name" :href="ex.url" target="_blank" rel="noopener" class="export-row">{{ ex.name }}</a>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <span class="spacer"></span>
+          <button class="btn btn-ghost" @click="closeExport">Close</button>
+          <button class="btn btn-primary" @click="startRender" :disabled="isRendering || !layout.items.length" data-test="export-render">
+            {{ isRendering ? 'Rendering\u2026' : (exporter.job && exporter.job.status === 'done' ? 'Render again' : 'Render movie') }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ Dialog ============ -->
+    <div v-if="dialog.open" class="modal-backdrop" @pointerdown.self="closeDialog(false)">
+      <div class="modal modal-small" role="dialog" aria-modal="true" :aria-label="dialog.title">
+        <div class="modal-head"><h3>{{ dialog.title }}</h3></div>
+        <div class="modal-body">
+          <p v-if="dialog.kind === 'confirm'" class="dialog-message">{{ dialog.message }}</p>
+          <template v-else>
+            <label class="muted small">{{ dialog.message }}</label>
+            <input ref="dialogInput" class="input" v-model="dialog.value" :placeholder="dialog.placeholder" maxlength="200" @keydown.enter.prevent="closeDialog(true)" data-test="dialog-input">
+          </template>
+        </div>
+        <div class="modal-foot">
+          <span class="spacer"></span>
+          <button class="btn btn-ghost" @click="closeDialog(false)">Cancel</button>
+          <button class="btn" :class="dialog.danger ? 'btn-danger' : 'btn-primary'" @click="closeDialog(true)" data-test="dialog-ok">{{ dialog.confirmLabel }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ Toasts ============ -->
+    <div class="toasts" aria-live="polite">
+      <div v-for="t in toasts" :key="t.id" class="toast" :class="'is-' + t.type">{{ t.text }}</div>
+    </div>
+  </div>
+</div>
+<script src="/player/interactive-player.js"></script>
+<script src="/studio/app.js"></script>
+</body>
+</html>

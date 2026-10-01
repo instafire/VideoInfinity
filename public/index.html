@@ -94,6 +94,7 @@
             <span class="text-3xl">🎬</span>
             <div><h1 class="font-bold text-white text-xl tracking-tight"> Mya Studio 20.7 </h1><div class="text-[10px] text-blue-400 uppercase tracking-widest font-bold">{{ currentProject ? currentProject.title : 'Select Project' }}</div></div>
         </div>
+        <a href="/" class="ml-auto mr-4 px-4 py-2 rounded-lg font-bold text-sm bg-blue-600/20 text-blue-300 border border-blue-500/30 hover:bg-blue-600/40 transition" title="Timeline editor: upload, cut, place choices and export one movie">Timeline Studio &rarr;</a>
         <div class="flex gap-2" v-if="currentProject">
             <button @click="view='upload'" :class="navClass('upload')">1. Import</button>
             <button @click="view='clipper'" :class="navClass('clipper')">2. Editor</button>
@@ -625,8 +626,11 @@
                     }).filter(x => x);
             },
 
-            filteredPublishClips() { 
-                return this.clips.filter(c => c.is_event_clip === 1 || this.edges.some(e => e.from_id === c.unique_id));
+            filteredPublishClips() {
+                // Any cut clip can go in the sequence (previously only clips that already had
+                // choices were listed, so plain scenes could never be added). Full source videos
+                // are listed when they have choices attached in the Logic tab.
+                return this.clips.filter(c => c.is_event_clip === 1 || !c.name.startsWith('FULL:') || this.edges.some(e => e.from_id === c.unique_id));
             },
             maxStatCount() { return Math.max(...this.statsData.map(s => s.count), 1); },
             previewCurrentChoices(){ return this.previewCurrentOptions ? this.previewCurrentOptions.choices : []; }
@@ -1037,13 +1041,11 @@
             getClipName(id) {
                 const c = this.clips.find(clip => clip.unique_id === id);
                 return c ? c.name : 'Unknown Clip';
-            },
-
-            addToSequence(clip) { this.storySequence.push({ id: clip.unique_id, name: clip.name }); },
-            removeFromSequence(idx) { this.storySequence.splice(idx, 1); },
-            async publishProject() { if(this.storySequence.length === 0) return alert("Sequence empty."); this.publishing = true; try { const res = await fetch('/api/publish', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ projectId: this.currentProject.id, title:this.publishTitle, sequence: this.storySequence }) }); const data = await res.json(); this.publishUrl = data.url; this.showToast("Build Complete!"); this.fetchExports(); } catch(e) { this.showToast("Build Failed", 'error'); } this.publishing = false; },
-            async fetchExports() { const res = await fetch('/api/exports'); this.exportsList = await res.json(); },
-            async fetchStats() { this.view = 'stats'; }
+            }
+            // NOTE: duplicate definitions of addToSequence/removeFromSequence/publishProject/
+            // fetchExports/fetchStats used to live here. Later keys override earlier ones in an
+            // object literal, so the stub `fetchStats() { this.view = 'stats'; }` replaced the real
+            // one and the Stats tab never loaded any data. The full versions are defined above.
         }
     }).mount('#app');
 </script>
