@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 npm install
 npm start        # same as `node server.js` / `npm run start:v2`; serves http://localhost:3000
-npm test         # API end-to-end test (test/timeline.test.js), no browser needed
+npm test         # compiler unit tests + API end-to-end test, no browser needed
 ```
 
 Environment variables: `PORT` (default 3000), `DB_FILE` (default `./database.sqlite`).
@@ -29,21 +29,34 @@ Environment variables: `PORT` (default 3000), `DB_FILE` (default `./database.sql
 - Rendering (`runTimelineRender`): main track stitched into one MP4 via a concat filter graph (scale/pad to one size, 30 fps, 48 kHz stereo, frame-quantized durations, silent audio for clips without audio). Option clips are encoded with the same settings. Output in `public/exports/<name>/` = `index.html` (player inlined, no CDN) + `movie.json` + `media/`.
 - Classic `/api/publish` still generates the playlist-based Vue player.
 
-### Timeline data model (`timelines.data` JSON)
+### Timeline data model (`timelines.data` JSON, v2)
+
+Defined in `public/player/movie-compiler.js` (UMD: loaded by the studio, `require`d by the
+server and the tests). `upgradeTimeline` migrates v1 data, `sanitizeTimeline` validates client
+input, `compileMovie` produces the player's movie + the story-check `issues`.
 
 ```js
 {
-  version: 1,
-  items: [{ id, clipId }],                       // main movie, played back to back
-  choicePoints: [{ id, itemId, offset,            // anchored to a timeline item (moves with it)
-                   prompt, timeout, allowSkip, defaultOptionId,
-                   options: [{ id, label, clipId, color }] }]
+  version: 2,
+  settings: { allowSeek, showChapters, rememberProgress },
+  items: [{ id, clipId, in, out }],               // main movie; in/out trim the clip (out null = clip end)
+  choicePoints: [{ id, itemId, at, prompt, timeout, mode: 'pause'|'play', allowSkip, defaultOptionId,
+                   options: [{ id, label, clipId|null, color,
+                               then: { type: 'continue'|'jump'|'end', targetId, ending },
+                               setFlags: [], requires: { flag, is }|null, whenLocked: 'hide'|'lock' }] }],
+  markers: [{ id, itemId, at, type: 'chapter'|'jump'|'end', label, targetId, condition, ending }],
+  overlays: [{ id, itemId, at, duration, text, position }]
 }
 ```
 
+`at` is media time inside the item's clip, so anchors stay on their frame when the clip is
+trimmed and move with the clip when clips are reordered. Jumps land with choices at the target
+active and markers at the target inactive; the player and the story check use the same rule.
+Captions live in the `captions` table (one SRT/VTT file per clip, parsed by `parseCaptions`).
+
 ### Player (`public/player/interactive-player.js` + `.css`)
 
-Dependency-free `InteractivePlayer` used by both the studio preview (several clips, double-buffered) and exports (one stitched file). It pauses at choice points, plays muted hover previews in the option cards, plays the chosen clip in a separate layer and then resumes the paused main video from the same frame. Expose state for tests via `element.__player.getSnapshot()`.
+Dependency-free `InteractivePlayer` used by both the studio preview (several clips, double-buffered, segments can start at `mediaStart` for trims) and exports (one stitched file). It pauses at choice points, plays muted hover previews in the option cards, plays the chosen clip in a separate layer and then resumes the paused main video from the same frame, or follows the option's jump/end action. It also handles markers, flags, locked options, titles, captions, the chapters menu, endings and progress saving (`enableProgressSaving(key)`, exports only). If the same jump marker fires twice with no choice in between it stops playback (flags only change at choices, so that loop would never end). Expose state for tests via `element.__player.getSnapshot()`.
 
 ### Frontends
 

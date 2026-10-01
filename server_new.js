@@ -43,13 +43,15 @@ function safePath(baseDir, userPath) {
 const UPLOAD_EXTENSIONS = {
     video: new Set(['mp4', 'm4v', 'mov', 'avi', 'mkv', 'webm']),
     audio: new Set(['mp3', 'wav', 'ogg', 'm4a', 'aac']),
-    image: new Set(['jpg', 'jpeg', 'png', 'gif', 'webp'])
+    image: new Set(['jpg', 'jpeg', 'png', 'gif', 'webp']),
+    captions: new Set(['srt', 'vtt'])
 };
 
 const ALLOWED_CONTAINERS = {
     video: new Set(['isobmff', 'quicktime', 'matroska', 'avi']),
     audio: new Set(['mp3', 'aac', 'ogg', 'wav', 'isobmff']),
-    image: new Set(['jpeg', 'png', 'gif', 'webp'])
+    image: new Set(['jpeg', 'png', 'gif', 'webp']),
+    captions: new Set(['text'])
 };
 
 function getUploadKind(originalName) {
@@ -82,8 +84,18 @@ function sniffMediaContainer(buf) {
     return null;
 }
 
+// Caption files are plain text (SRT / WebVTT): reject anything with NUL bytes or a BOM for
+// UTF-16/32 so a renamed binary can't slip through.
+function sniffTextFile(buf) {
+    if (!buf || !buf.length) return null;
+    if (buf.includes(0x00)) return null;
+    const head = buf.toString('latin1', 0, Math.min(buf.length, 4));
+    if (head.startsWith('\u00FF\u00FE') || head.startsWith('\u00FE\u00FF')) return null;
+    return 'text';
+}
+
 function validateMagicBytes(buffer, kind) {
-    const container = sniffMediaContainer(buffer);
+    const container = kind === 'captions' ? sniffTextFile(buffer) : sniffMediaContainer(buffer);
     return Boolean(container && ALLOWED_CONTAINERS[kind] && ALLOWED_CONTAINERS[kind].has(container));
 }
 
@@ -521,7 +533,7 @@ app.use('/vendor/vue', express.static(path.join(__dirname, 'node_modules', 'vue'
 app.use(express.static(path.join(__dirname, 'public')));
 
 // 1. SETUP FOLDERS
-const folders = ['videos', 'clips', 'thumbnails', 'exports', 'audio', 'images'];
+const folders = ['videos', 'clips', 'thumbnails', 'exports', 'audio', 'images', 'captions'];
 folders.forEach(f => fs.ensureDirSync(path.join(__dirname, 'public', f)));
 
 // 2. DATABASE INIT
@@ -550,6 +562,9 @@ let db;
 
     // Timeline Studio: one saved timeline (main track + choice points) per project
     await db.exec(`CREATE TABLE IF NOT EXISTS timelines (project_id INTEGER PRIMARY KEY, data TEXT NOT NULL, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);`);
+
+    // Captions (SRT / WebVTT) attached to a clip
+    await db.exec(`CREATE TABLE IF NOT EXISTS captions (clip_id TEXT PRIMARY KEY, project_id INTEGER, filename TEXT, filepath TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`);
 
     const migrations = [
         `ALTER TABLE projects ADD COLUMN theme_color TEXT DEFAULT '#3b82f6'`,
@@ -613,7 +628,7 @@ let db;
     console.log("✅ Studio Infinity Final v20.13 (Optimized) Ready");
 })();
 
-const UPLOAD_FOLDERS = { video: 'public/videos', audio: 'public/audio', image: 'public/images' };
+const UPLOAD_FOLDERS = { video: 'public/videos', audio: 'public/audio', image: 'public/images', captions: 'public/captions' };
 
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -631,7 +646,8 @@ const fileFilter = (req, file, cb) => {
     const kind = getUploadKind(file.originalname);
     const mimeFamily = String(file.mimetype || '').split('/')[0];
     const mimeConflicts = ['video', 'audio', 'image'].includes(mimeFamily) && mimeFamily !== kind
-        && !(kind === 'audio' && mimeFamily === 'video') && !(kind === 'video' && mimeFamily === 'audio');
+        && !(kind === 'audio' && mimeFamily === 'video') && !(kind === 'video' && mimeFamily === 'audio')
+        && kind !== 'captions';
     if (kind && !mimeConflicts) {
         cb(null, true);
     } else {
@@ -1168,6 +1184,15 @@ app.post('/api/upload', uploadLimiter, handleSingleUpload, async (req, res) => {
                 success: true,
                 type: 'image',
                 path: `/images/${req.file.filename}`,
+                name: req.file.originalname
+            });
+        }
+
+        if (kind === 'captions') {
+            return res.json({
+                success: true,
+                type: 'captions',
+                path: `/captions/${req.file.filename}`,
                 name: req.file.originalname
             });
         }
@@ -1848,6 +1873,76 @@ app.post('/api/delete_logic_block', async (req, res) => {
     }
 });
 
+// --- CAPTIONS (SRT / WebVTT per clip) ---
+// The file itself is uploaded through /api/upload (kind "captions"); these endpoints attach
+// it to a clip and parse it into cues.
+
+app.get('/api/captions', async (req, res) => {
+    const projectId = req.query.projectId || 1;
+    if (!validateProjectId(projectId)) {
+        return res.status(400).json({ error: 'Invalid project ID' });
+    }
+    try {
+        const rows = await db.all('SELECT clip_id, filename, filepath FROM captions WHERE project_id = ?', [projectId]);
+        res.json(rows.map((row) => ({ clipId: row.clip_id, filename: row.filename, path: row.filepath })));
+    } catch (err) {
+        console.error('Error fetching captions:', err);
+        res.status(500).json({ error: 'Failed to fetch captions' });
+    }
+});
+
+app.post('/api/clip/captions', async (req, res) => {
+    const { projectId, clipId, path: captionPath, filename } = req.body;
+    if (!validateProjectId(projectId)) {
+        return res.status(400).json({ error: 'Invalid project ID' });
+    }
+    if (!validateUuid(clipId)) {
+        return res.status(400).json({ error: 'Invalid clip ID' });
+    }
+    try {
+        const clip = await db.get('SELECT unique_id FROM clips WHERE unique_id = ? AND project_id = ?', [clipId, projectId]);
+        if (!clip) {
+            return res.status(404).json({ error: 'Clip not found' });
+        }
+        const file = safePath(path.join(__dirname, 'public'), String(captionPath || '').replace(/^\/+/, ''));
+        if (!file || !file.startsWith(path.join(__dirname, 'public', 'captions')) || !await fs.pathExists(file)) {
+            return res.status(400).json({ error: 'Caption file not found. Upload the .srt or .vtt file first.' });
+        }
+        const cues = MovieCompiler.parseCaptions(await fs.readFile(file, 'utf8'));
+        if (!cues.length) {
+            return res.status(400).json({ error: `No captions found in "${filename || captionPath}". Use SRT or WebVTT format.` });
+        }
+        await db.run(
+            `INSERT INTO captions (clip_id, project_id, filename, filepath) VALUES (?, ?, ?, ?)
+             ON CONFLICT(clip_id) DO UPDATE SET project_id = excluded.project_id, filename = excluded.filename, filepath = excluded.filepath`,
+            [clipId, projectId, normalizeText(filename, 200) || path.basename(file), `/captions/${path.basename(file)}`]
+        );
+        res.json({ success: true, count: cues.length });
+    } catch (err) {
+        console.error('Error attaching captions:', err);
+        res.status(500).json({ error: 'Failed to attach captions' });
+    }
+});
+
+app.post('/api/clip/captions/delete', async (req, res) => {
+    const { clipId } = req.body;
+    if (!validateUuid(clipId)) {
+        return res.status(400).json({ error: 'Invalid clip ID' });
+    }
+    try {
+        const row = await db.get('SELECT filepath FROM captions WHERE clip_id = ?', [clipId]);
+        await db.run('DELETE FROM captions WHERE clip_id = ?', [clipId]);
+        if (row) {
+            const file = safePath(path.join(__dirname, 'public'), String(row.filepath).replace(/^\/+/, ''));
+            if (file) await fs.unlink(file).catch(() => {});
+        }
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Error deleting captions:', err);
+        res.status(500).json({ error: 'Failed to delete captions' });
+    }
+});
+
 // =====================================================================
 // TIMELINE STUDIO
 // One saved timeline per project:
@@ -1861,71 +1956,14 @@ app.post('/api/delete_logic_block', async (req, res) => {
 // writes a self-contained player (public/player/*) that needs no CDN.
 // =====================================================================
 
-const TIMELINE_LIMITS = { items: 500, choicePoints: 300, options: 6 };
-const HEX_COLOR_RE = /^#[0-9a-f]{6}$/i;
 const RENDER_FPS = 30;
 
+// The timeline shape (v2: trims, markers, overlays, option actions/flags) lives in
+// public/player/movie-compiler.js, which is shared by the studio, this server and the tests.
+const MovieCompiler = require('./public/player/movie-compiler.js');
+
 function emptyTimeline() {
-    return { version: 1, items: [], choicePoints: [] };
-}
-
-function cleanTimelineId(value) {
-    return typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value) ? value : null;
-}
-
-function sanitizeTimeline(input, clipMap) {
-    const timeline = emptyTimeline();
-    const source = input && typeof input === 'object' ? input : {};
-
-    const seenItems = new Set();
-    (Array.isArray(source.items) ? source.items : []).slice(0, TIMELINE_LIMITS.items).forEach((item) => {
-        if (!item || typeof item !== 'object') return;
-        const id = cleanTimelineId(item.id) || uuidv4();
-        if (seenItems.has(id) || typeof item.clipId !== 'string' || !clipMap.has(item.clipId)) return;
-        seenItems.add(id);
-        timeline.items.push({ id, clipId: item.clipId });
-    });
-
-    const itemMap = new Map(timeline.items.map((item) => [item.id, item]));
-    const seenPoints = new Set();
-    (Array.isArray(source.choicePoints) ? source.choicePoints : []).slice(0, TIMELINE_LIMITS.choicePoints).forEach((point) => {
-        if (!point || typeof point !== 'object') return;
-        const item = itemMap.get(point.itemId);
-        if (!item) return; // its clip was removed from the timeline
-        const id = cleanTimelineId(point.id) || uuidv4();
-        if (seenPoints.has(id)) return;
-        seenPoints.add(id);
-
-        const seenOptions = new Set();
-        const options = [];
-        (Array.isArray(point.options) ? point.options : []).slice(0, TIMELINE_LIMITS.options).forEach((option) => {
-            if (!option || typeof option !== 'object') return;
-            const optionId = cleanTimelineId(option.id) || uuidv4();
-            if (seenOptions.has(optionId)) return;
-            seenOptions.add(optionId);
-            options.push({
-                id: optionId,
-                label: normalizeText(option.label, 80),
-                // null = not assigned yet (kept so the label isn't lost while editing)
-                clipId: typeof option.clipId === 'string' && clipMap.has(option.clipId) ? option.clipId : null,
-                color: HEX_COLOR_RE.test(option.color || '') ? option.color : '#ffffff'
-            });
-        });
-
-        const clip = clipMap.get(item.clipId);
-        timeline.choicePoints.push({
-            id,
-            itemId: item.id,
-            offset: clampNumber(point.offset, 0, Math.max(0, Number(clip.duration) || 0), 0),
-            prompt: normalizeText(point.prompt, 160),
-            timeout: clampNumber(point.timeout, 0, 120, 0),
-            allowSkip: point.allowSkip !== false,
-            defaultOptionId: options.some((o) => o.id === point.defaultOptionId) ? point.defaultOptionId : null,
-            options
-        });
-    });
-
-    return timeline;
+    return MovieCompiler.upgradeTimeline({});
 }
 
 async function loadProjectTimeline(projectId, clipMap) {
@@ -1938,7 +1976,7 @@ async function loadProjectTimeline(projectId, clipMap) {
             console.warn(`Timeline for project ${projectId} is not valid JSON; starting empty.`);
         }
     }
-    return { timeline: sanitizeTimeline(parsed, clipMap), updatedAt: row ? row.updated_at : null };
+    return { timeline: MovieCompiler.sanitizeTimeline(parsed, clipMap), updatedAt: row ? row.updated_at : null };
 }
 
 app.get('/api/timeline', async (req, res) => {
@@ -1970,7 +2008,7 @@ app.post('/api/timeline', async (req, res) => {
             return res.status(404).json({ error: 'Project not found' });
         }
         const clips = await db.all('SELECT unique_id, duration FROM clips WHERE project_id = ?', [projectId]);
-        const clean = sanitizeTimeline(timeline, new Map(clips.map((c) => [c.unique_id, c])));
+        const clean = MovieCompiler.sanitizeTimeline(timeline, new Map(clips.map((c) => [c.unique_id, c])));
         await db.run(
             `INSERT INTO timelines (project_id, data, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
              ON CONFLICT(project_id) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP`,
@@ -2062,12 +2100,16 @@ function chooseRenderSize(first, resolution) {
 }
 
 // Encodes one or more inputs into a single normalized mp4 (same size, fps, pixel format and
-// audio layout). Durations are frame-quantized and every segment's audio is padded/trimmed
-// to exactly its video length, so stitched segments never drift out of sync.
+// audio layout). Each segment can start at `mediaStart` seconds into its file (timeline
+// trims). Durations are frame-quantized and every segment's audio is padded/trimmed to
+// exactly its video length, so stitched segments never drift out of sync.
 function renderNormalizedVideo(segments, outPath, size, onProgress) {
     const { width: W, height: H } = size;
     const command = ffmpeg();
-    segments.forEach((segment) => command.input(segment.file));
+    segments.forEach((segment) => {
+        const input = command.input(segment.file);
+        if (segment.mediaStart > 0.0005) input.inputOptions([`-ss ${segment.mediaStart.toFixed(6)}`]);
+    });
 
     const filters = [];
     const concatPads = [];
@@ -2159,12 +2201,14 @@ ${js.replace(/<\/script/gi, '<\\/script')}
             }).catch(function () {});
         } catch (e) {}
     }
-    new InteractivePlayer(document.getElementById('movie'), Object.assign({}, movie, {
+    var player = new InteractivePlayer(document.getElementById('movie'), Object.assign({}, movie, {
         startScreen: true,
         onEvent: function (type, detail) {
-            if (type === 'choice' && detail && detail.option) track('choice', detail.option.label || 'Choice', detail.option.clipId);
+            if (type === 'choice' && detail && detail.option) track('choice', detail.option.label || 'Choice', detail.option.clip && detail.option.clip.clipId);
+            if (type === 'ended') track('ending', detail.label || 'The End', detail.endingId);
         }
     }));
+    player.enableProgressSaving('vi-movie-' + movie.projectId + '-' + (movie.exportName || 'preview'));
 })();
 </script>
 </body>
@@ -2178,10 +2222,26 @@ async function buildRenderPlan(projectId) {
     const clips = await db.all('SELECT * FROM clips WHERE project_id = ?', [projectId]);
     const clipMap = new Map(clips.map((c) => [c.unique_id, c]));
     const { timeline } = await loadProjectTimeline(projectId, clipMap);
-    if (!timeline.items.length) {
+
+    // Captions for every clip used anywhere in the movie
+    const captionRows = await db.all('SELECT clip_id, filepath FROM captions WHERE project_id = ?', [projectId]);
+    const captions = new Map();
+    for (const row of captionRows) {
+        const file = safePath(path.join(__dirname, 'public'), String(row.filepath || '').replace(/^\/+/, ''));
+        if (!file || !await fs.pathExists(file)) continue;
+        try {
+            captions.set(row.clip_id, MovieCompiler.parseCaptions(await fs.readFile(file, 'utf8')));
+        } catch (e) {
+            console.warn('Could not parse captions for clip', row.clip_id, e.message);
+        }
+    }
+
+    const compiled = MovieCompiler.compileMovie({ timeline, clips: clipMap, captions, quantizeFps: RENDER_FPS });
+    if (!compiled.movie.segments.length) {
         return { error: 'Add at least one clip to the main timeline before exporting.' };
     }
 
+    // Resolve every file the render needs and fail early with a readable message
     const publicDir = path.join(__dirname, 'public');
     const missing = new Set();
     const resolveFile = (clip) => {
@@ -2189,27 +2249,16 @@ async function buildRenderPlan(projectId) {
         if (!file || !fs.existsSync(file)) missing.add(clip.name);
         return file;
     };
-
-    const items = timeline.items.map((item) => {
-        const clip = clipMap.get(item.clipId);
-        return { ...item, clip, file: resolveFile(clip) };
-    });
-    const points = timeline.choicePoints
-        .map((point) => ({
-            ...point,
-            options: point.options
-                .filter((option) => option.clipId)
-                .map((option) => {
-                    const clip = clipMap.get(option.clipId);
-                    return { ...option, clip, file: resolveFile(clip) };
-                })
-        }))
-        .filter((point) => point.options.length > 0);
-
+    const usedClipIds = new Set(compiled.movie.segments.map((s) => s.clipId));
+    compiled.movie.choicePoints.forEach((p) => p.options.forEach((o) => { if (o.clip) usedClipIds.add(o.clip.clipId); }));
+    const files = new Map();
+    for (const clipId of usedClipIds) {
+        files.set(clipId, resolveFile(clipMap.get(clipId)));
+    }
     if (missing.size) {
         return { error: `These clips are missing their video files: ${[...missing].join(', ')}` };
     }
-    return { project, items, points };
+    return { project, timeline, compiled, files };
 }
 
 async function runTimelineRender(job, plan, title, resolution) {
@@ -2222,17 +2271,25 @@ async function runTimelineRender(job, plan, title, resolution) {
 
     try {
         await fs.ensureDir(mediaDir);
+        const compiled = plan.compiled;
         const probes = new Map();
         const probe = async (file) => {
             if (!probes.has(file)) probes.set(file, await ffprobeAsync(file));
             return probes.get(file);
         };
 
-        // Main track: exact durations from the files themselves
+        // Main track: one render segment per timeline item (trims included)
         const mainSegments = [];
-        for (const item of plan.items) {
-            const info = describeMedia(await probe(item.file), item.clip);
-            mainSegments.push({ item, file: item.file, ...info, renderDuration: toFrames(info.duration) });
+        for (const segment of compiled.movie.segments) {
+            const file = plan.files.get(segment.clipId);
+            const info = describeMedia(await probe(file), null);
+            mainSegments.push({
+                segment,
+                file,
+                ...info,
+                mediaStart: segment.mediaStart,
+                renderDuration: segment.duration // already frame-quantized by the compiler
+            });
         }
         let cursor = 0;
         mainSegments.forEach((segment) => {
@@ -2244,14 +2301,14 @@ async function runTimelineRender(job, plan, title, resolution) {
 
         // Option clips: each distinct clip is encoded once, even if several options use it
         const optionFiles = new Map();
-        for (const point of plan.points) {
+        for (const point of compiled.movie.choicePoints) {
             for (const option of point.options) {
-                if (optionFiles.has(option.clipId)) continue;
-                const info = describeMedia(await probe(option.file), option.clip);
+                if (!option.clip || optionFiles.has(option.clip.clipId)) continue;
+                const file = plan.files.get(option.clip.clipId);
+                const info = describeMedia(await probe(file), null);
                 const index = optionFiles.size + 1;
-                optionFiles.set(option.clipId, {
-                    clip: option.clip,
-                    file: option.file,
+                optionFiles.set(option.clip.clipId, {
+                    file,
                     ...info,
                     renderDuration: toFrames(info.duration),
                     outName: `option_${index}.mp4`,
@@ -2278,58 +2335,40 @@ async function runTimelineRender(job, plan, title, resolution) {
             const stage = `Encoding choice clip ${optionIndex} of ${optionFiles.size}`;
             report(stage);
             const outFile = path.join(mediaDir, option.outName);
-            await renderNormalizedVideo([option], outFile, size, (seconds) => report(stage, seconds));
+            await renderNormalizedVideo([{ ...option, mediaStart: 0 }], outFile, size, (seconds) => report(stage, seconds));
             option.hasPoster = await extractPosterFrame(outFile, path.join(mediaDir, option.posterName), Math.min(option.renderDuration * 0.2, 2));
             doneWork += option.renderDuration;
         }
 
         report('Writing player');
         const hasMainPoster = await extractPosterFrame(path.join(mediaDir, 'main.mp4'), path.join(mediaDir, 'poster.jpg'), Math.min(1, mainDuration / 2));
-        const segmentByItem = new Map(mainSegments.map((segment) => [segment.item.id, segment]));
-        const choicePoints = plan.points
-            .map((point) => {
-                const segment = segmentByItem.get(point.itemId);
-                const time = Math.min(segment.start + Math.min(point.offset, segment.renderDuration), mainDuration);
-                return {
-                    id: point.id,
-                    time: roundTime(time),
-                    prompt: point.prompt,
-                    timeout: point.timeout,
-                    allowSkip: point.allowSkip,
-                    defaultOptionId: point.defaultOptionId,
-                    options: point.options.map((option) => {
-                        const file = optionFiles.get(option.clipId);
-                        return {
-                            id: option.id,
-                            label: option.label || String(file.clip.name || 'Option').replace(/^FULL:\s*/, ''),
-                            color: option.color,
-                            clipId: option.clipId,
-                            src: `media/${file.outName}`,
-                            poster: file.hasPoster ? `media/${file.posterName}` : '',
-                            duration: roundTime(file.renderDuration)
-                        };
-                    })
-                };
-            })
-            .sort((a, b) => a.time - b.time);
 
-        const manifest = {
-            version: 1,
+        // Final manifest: compiled movie with rendered file paths and rendered durations
+        const manifest = Object.assign({}, compiled.movie, {
+            version: 2,
             title,
             projectId: job.projectId,
+            exportName,
             createdAt: new Date().toISOString(),
             width: size.width,
             height: size.height,
-            duration: roundTime(mainDuration),
             poster: hasMainPoster ? 'media/poster.jpg' : '',
             theme: validateColor(plan.project.theme_color || '') ? plan.project.theme_color : '#3b82f6',
             segments: [{ src: 'media/main.mp4', duration: roundTime(mainDuration) }],
-            chapters: mainSegments.map((segment) => ({
-                start: roundTime(segment.start),
-                name: String(segment.item.clip.name || '').replace(/^FULL:\s*/, '')
-            })),
-            choicePoints
-        };
+            choicePoints: compiled.movie.choicePoints.map((point) => Object.assign({}, point, {
+                options: point.options.map((option) => {
+                    if (!option.clip) return option;
+                    const file = optionFiles.get(option.clip.clipId);
+                    return Object.assign({}, option, {
+                        clip: Object.assign({}, option.clip, {
+                            src: `media/${file.outName}`,
+                            poster: file.hasPoster ? `media/${file.posterName}` : '',
+                            duration: roundTime(file.renderDuration)
+                        })
+                    });
+                })
+            }))
+        });
 
         await fs.writeJson(path.join(exportDir, 'movie.json'), manifest, { spaces: 2 });
         await fs.writeFile(path.join(exportDir, 'index.html'), await buildTimelinePlayerHtml(manifest));
@@ -2388,7 +2427,7 @@ app.post('/api/timeline/render', async (req, res) => {
         pruneRenderJobs();
         // One render at a time keeps the machine responsive
         renderQueue = renderQueue.then(() => runTimelineRender(job, plan, cleanTitle, cleanResolution)).catch(() => {});
-        res.json({ success: true, job: publicRenderJob(job) });
+        res.json({ success: true, job: publicRenderJob(job), issues: plan.compiled.issues, stats: plan.compiled.stats });
     } catch (err) {
         console.error('Error starting render:', err);
         res.status(500).json({ error: 'Failed to start rendering' });

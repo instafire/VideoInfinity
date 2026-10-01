@@ -68,28 +68,25 @@
     }
 
     function emptyTimeline() {
-        return { version: 1, items: [], choicePoints: [] };
+        return MovieCompiler.upgradeTimeline({});
     }
 
+    // The timeline shape (v2: trims, markers, overlays, option actions/flags) is defined by the
+    // shared compiler (public/player/movie-compiler.js), which also runs on the server.
     function normalizeTimeline(raw) {
-        var timeline = emptyTimeline();
-        if (!raw || typeof raw !== 'object') return timeline;
-        timeline.items = (raw.items || []).map(function (item) { return { id: item.id || uid(), clipId: item.clipId }; });
-        timeline.choicePoints = (raw.choicePoints || []).map(function (p) {
-            return {
-                id: p.id || uid(),
-                itemId: p.itemId,
-                offset: Number(p.offset) || 0,
-                prompt: p.prompt || '',
-                timeout: Number(p.timeout) || 0,
-                allowSkip: p.allowSkip !== false,
-                defaultOptionId: p.defaultOptionId || null,
-                options: (p.options || []).map(function (o) {
-                    return { id: o.id || uid(), label: o.label || '', clipId: o.clipId || null, color: o.color || '#ffffff' };
-                })
-            };
-        });
-        return timeline;
+        var t = MovieCompiler.upgradeTimeline(raw);
+        // Fresh ids for anything missing one
+        var seen = new Set();
+        var fix = function (id) {
+            var out = typeof id === 'string' && id && !seen.has(id) ? id : uid();
+            seen.add(out);
+            return out;
+        };
+        t.items.forEach(function (i) { i.id = fix(i.id); });
+        t.choicePoints.forEach(function (p) { p.id = fix(p.id); p.options.forEach(function (o) { o.id = fix(o.id); }); });
+        t.markers.forEach(function (m) { m.id = fix(m.id); });
+        t.overlays.forEach(function (o) { o.id = fix(o.id); });
+        return t;
     }
 
     createApp({
@@ -121,7 +118,9 @@
                     open: false, videoId: null, duration: 0, in: 0, out: 0, current: 0, playing: false,
                     name: '', nameTouched: false, addToTimeline: true, busy: false, error: '', selectionEnd: null
                 },
-                exporter: { open: false, title: '', resolution: 'auto', job: null, error: '', exports: [] },
+                captions: {},
+                settingsOpen: false,
+                exporter: { open: false, title: '', resolution: 'auto', job: null, error: '', exports: [], issues: [], stats: null },
                 dialog: { open: false, kind: 'text', title: '', message: '', value: '', placeholder: '', confirmLabel: 'OK', danger: false },
                 toasts: []
             };
@@ -149,8 +148,11 @@
                 this.timeline.items.forEach(function (item) {
                     var clip = self.clipMap.get(item.clipId);
                     if (!clip) return;
-                    var duration = Math.max(0.1, Number(clip.duration) || 0);
-                    items.push({ item: item, clip: clip, start: t, duration: duration, end: t + duration });
+                    var clipDur = Math.max(0.1, Number(clip.duration) || 0);
+                    var inPoint = clamp(Number(item.in) || 0, 0, Math.max(0, clipDur - 0.1));
+                    var out = item.out === null || item.out === undefined ? clipDur : clamp(Number(item.out), inPoint + 0.1, clipDur);
+                    var duration = out - inPoint;
+                    items.push({ item: item, clip: clip, start: t, duration: duration, end: t + duration, trimmed: inPoint > 0.0005 || out < clipDur - 0.0005 });
                     t += duration;
                 });
                 return { items: items, total: t, byId: new Map(items.map(function (e) { return [e.item.id, e]; })) };
@@ -164,10 +166,33 @@
                     .map(function (point) {
                         var entry = self.layout.byId.get(point.itemId);
                         if (!entry) return null;
-                        return { point: point, entry: entry, time: entry.start + clamp(point.offset, 0, entry.duration) };
+                        return { point: point, entry: entry, time: entry.start + clamp(point.at - entry.item.in, 0, entry.duration) };
                     })
                     .filter(Boolean)
                     .sort(function (a, b) { return a.time - b.time; });
+            },
+            markersLayout: function () {
+                var self = this;
+                return this.timeline.markers
+                    .map(function (marker) {
+                        var entry = self.layout.byId.get(marker.itemId);
+                        if (!entry) return null;
+                        return { marker: marker, entry: entry, time: entry.start + clamp(marker.at - entry.item.in, 0, entry.duration) };
+                    })
+                    .filter(Boolean)
+                    .sort(function (a, b) { return a.time - b.time; });
+            },
+            overlaysLayout: function () {
+                var self = this;
+                return this.timeline.overlays
+                    .map(function (overlay) {
+                        var entry = self.layout.byId.get(overlay.itemId);
+                        if (!entry) return null;
+                        var start = entry.start + clamp(overlay.at - entry.item.in, 0, entry.duration);
+                        return { overlay: overlay, entry: entry, start: start, end: Math.min(self.totalDuration, start + overlay.duration) };
+                    })
+                    .filter(Boolean)
+                    .sort(function (a, b) { return a.start - b.start; });
             },
             selectedPoint: function () {
                 if (!this.selection || this.selection.type !== 'choice') return null;
@@ -180,7 +205,30 @@
             },
             selectedPointTime: function () {
                 var entry = this.selectedPointEntry;
-                return entry ? entry.start + clamp(this.selectedPoint.offset, 0, entry.duration) : 0;
+                return entry ? entry.start + clamp(this.selectedPoint.at - entry.item.in, 0, entry.duration) : 0;
+            },
+            selectedMarker: function () {
+                if (!this.selection || this.selection.type !== 'marker') return null;
+                var id = this.selection.id;
+                var marker = this.timeline.markers.find(function (m) { return m.id === id; }) || null;
+                return marker && this.layout.byId.get(marker.itemId) ? marker : null;
+            },
+            selectedMarkerTime: function () {
+                var ml = this.markersLayout.find(function (x) { return x.marker === this.selectedMarker; }, this);
+                return ml ? ml.time : 0;
+            },
+            selectedOverlay: function () {
+                if (!this.selection || this.selection.type !== 'overlay') return null;
+                var id = this.selection.id;
+                var overlay = this.timeline.overlays.find(function (o) { return o.id === id; }) || null;
+                return overlay && this.layout.byId.get(overlay.itemId) ? overlay : null;
+            },
+            selectedOverlayTime: function () {
+                var ol = this.overlaysLayout.find(function (x) { return x.overlay === this.selectedOverlay; }, this);
+                return ol ? ol.start : 0;
+            },
+            chapterMarkers: function () {
+                return this.timeline.markers.filter(function (m) { return m.type === 'chapter'; });
             },
             selectedItemEntry: function () {
                 if (!this.selection || this.selection.type !== 'item') return null;
@@ -200,21 +248,26 @@
                 });
                 return ids.size;
             },
-            issues: function () {
+            // Compiled movie + story check (shared compiler: same result as the export)
+            compiled: function () {
+                return MovieCompiler.compileMovie({ timeline: this.timeline, clips: this.clipMap, captions: this.captionsMap });
+            },
+            captionsMap: function () {
+                var map = new Map();
                 var self = this;
-                var list = [];
-                this.pointsLayout.forEach(function (pl) {
-                    var where = 'Choice at ' + fmtPrecise(pl.time);
-                    if (!pl.point.options.length) {
-                        list.push({ pointId: pl.point.id, text: where + ' has no options' });
-                        return;
-                    }
-                    pl.point.options.forEach(function (o, i) {
-                        if (!o.clipId) list.push({ pointId: pl.point.id, text: where + ': option ' + (i + 1) + (o.label ? ' (\u201c' + o.label + '\u201d)' : '') + ' needs a clip' });
-                        else if (!self.clipMap.get(o.clipId)) list.push({ pointId: pl.point.id, text: where + ': option ' + (i + 1) + ' uses a deleted clip' });
-                    });
-                });
-                return list;
+                Object.keys(this.captions).forEach(function (clipId) { map.set(clipId, self.captions[clipId].cues || []); });
+                return map;
+            },
+            issues: function () {
+                return this.compiled.issues;
+            },
+            issueSummary: function () {
+                var errors = this.issues.filter(function (i) { return i.severity === 'error'; }).length;
+                var warnings = this.issues.filter(function (i) { return i.severity === 'warning'; }).length;
+                var parts = [];
+                if (errors) parts.push(errors + ' error' + (errors === 1 ? '' : 's'));
+                if (warnings) parts.push(warnings + ' warning' + (warnings === 1 ? '' : 's'));
+                return parts.length ? parts.join(' and ') + ' found.' : '';
             },
             choiceButtonTitle: function () {
                 return this.selectedPoint
@@ -253,6 +306,12 @@
                 var most = this.timeline.choicePoints.reduce(function (max, p) { return Math.max(max, p.options.length); }, 1);
                 return Math.max(84, 26 + most * 27);
             },
+            markerTrackHeight: function () {
+                return 34;
+            },
+            overlayTrackHeight: function () {
+                return 34;
+            },
             dropMarkerX: function () {
                 var drop = this.tlDrop && this.tlDrop.track === 'main' ? this.tlDrop : null;
                 var index = drop ? drop.index : (this.drag && this.drag.kind === 'item' && this.drag.index !== null ? this.drag.index : null);
@@ -264,35 +323,17 @@
                 return t * this.pps;
             },
             playerData: function () {
-                var self = this;
-                var segments = this.layout.items.map(function (e) {
-                    return { id: e.item.id, src: e.clip.filepath, duration: e.duration, label: self.displayName(e.clip) };
-                });
-                var choicePoints = this.pointsLayout.map(function (pl) {
-                    return {
-                        id: pl.point.id,
-                        time: pl.time,
-                        prompt: pl.point.prompt,
-                        timeout: pl.point.timeout,
-                        allowSkip: pl.point.allowSkip,
-                        defaultOptionId: pl.point.defaultOptionId,
-                        options: pl.point.options
-                            .filter(function (o) { return o.clipId && self.clipMap.get(o.clipId); })
-                            .map(function (o) {
-                                var clip = self.clipMap.get(o.clipId);
-                                return {
-                                    id: o.id,
-                                    label: o.label || self.displayName(clip),
-                                    color: o.color,
-                                    clipId: o.clipId,
-                                    src: clip.filepath,
-                                    poster: clip.thumbnail || '',
-                                    duration: Number(clip.duration) || 0
-                                };
-                            })
-                    };
-                });
-                return { segments: segments, choicePoints: choicePoints };
+                // The compiled movie is exactly what the export renders, so the preview matches.
+                var movie = this.compiled.movie;
+                return {
+                    segments: movie.segments,
+                    choicePoints: movie.choicePoints,
+                    markers: movie.markers,
+                    overlays: movie.overlays,
+                    captions: movie.captions,
+                    endings: movie.endings,
+                    settings: movie.settings
+                };
             },
             cutterVideo: function () {
                 var id = this.cutter.videoId;
@@ -402,7 +443,9 @@
                         api('/api/videos?projectId=' + id),
                         api('/api/story?projectId=' + id),
                         api('/api/timeline?projectId=' + id)
-                    ]);
+                    ]).then(function (results) {
+                        return self.loadCaptions().then(function () { return results; });
+                    });
                 }).then(function (results) {
                     self._suspendSave = true;
                     self.videos = results[0] || [];
@@ -464,9 +507,15 @@
                         }
                     });
                 });
+                var markers = tl.markers.filter(function (m) { return itemIds.has(m.itemId); });
+                if (markers.length !== tl.markers.length) changed = true;
+                var overlays = tl.overlays.filter(function (o) { return itemIds.has(o.itemId); });
+                if (overlays.length !== tl.overlays.length) changed = true;
                 if (changed) {
                     tl.items = items;
                     tl.choicePoints = points;
+                    tl.markers = markers;
+                    tl.overlays = overlays;
                     this.validateSelection();
                 }
             },
@@ -553,21 +602,25 @@
                 if (!sel) return;
                 var exists = sel.type === 'item'
                     ? this.timeline.items.some(function (i) { return i.id === sel.id; })
-                    : this.timeline.choicePoints.some(function (p) { return p.id === sel.id; });
+                    : sel.type === 'marker'
+                        ? this.timeline.markers.some(function (m) { return m.id === sel.id; })
+                        : sel.type === 'overlay'
+                            ? this.timeline.overlays.some(function (o) { return o.id === sel.id; })
+                            : this.timeline.choicePoints.some(function (p) { return p.id === sel.id; });
                 if (!exists) this.selection = null;
             },
 
             // ---------------------------------------------------------- main track
             appendClip: function (clip) {
                 var id = uid();
-                this.commit(function (tl) { tl.items.push({ id: id, clipId: clip.unique_id }); });
+                this.commit(function (tl) { tl.items.push({ id: id, clipId: clip.unique_id, in: 0, out: null }); });
                 this.selection = { type: 'item', id: id };
                 this.toast('Added \u201c' + this.displayName(clip) + '\u201d to the main movie');
             },
             insertClipAt: function (clipId, index) {
                 var id = uid();
                 this.commit(function (tl) {
-                    tl.items.splice(clamp(index, 0, tl.items.length), 0, { id: id, clipId: clipId });
+                    tl.items.splice(clamp(index, 0, tl.items.length), 0, { id: id, clipId: clipId, in: 0, out: null });
                 });
                 this.selection = { type: 'item', id: id };
             },
@@ -595,13 +648,15 @@
                 this.commit(function (tl) {
                     var index = tl.items.findIndex(function (i) { return i.id === itemId; });
                     if (index < 0) return;
-                    tl.items.splice(index + 1, 0, { id: id, clipId: tl.items[index].clipId });
+                    tl.items.splice(index + 1, 0, { id: id, clipId: tl.items[index].clipId, in: tl.items[index].in, out: tl.items[index].out });
                 });
                 this.selection = { type: 'item', id: id };
             },
             deleteSelection: function () {
                 if (!this.selection) return;
                 if (this.selection.type === 'item') this.removeItem(this.selection.id);
+                else if (this.selection.type === 'marker') this.removeMarker(this.selection.id);
+                else if (this.selection.type === 'overlay') this.removeOverlay(this.selection.id);
                 else this.removePoint(this.selection.id);
             },
             dropIndexAt: function (t, excludeId) {
@@ -616,14 +671,20 @@
                 if (!items.length) return null;
                 for (var i = 0; i < items.length; i++) {
                     if (t < items[i].end - 1e-6) {
-                        return { itemId: items[i].item.id, offset: round3(clamp(t - items[i].start, 0, items[i].duration)) };
+                        var inPoint = Number(items[i].item.in) || 0;
+                        return { itemId: items[i].item.id, at: round3(clamp(inPoint + (t - items[i].start), 0, items[i].clip.duration)) };
                     }
                 }
                 var last = items[items.length - 1];
-                return { itemId: last.item.id, offset: round3(last.duration) };
+                var lastOut = last.item.out === null || last.item.out === undefined ? last.clip.duration : last.item.out;
+                return { itemId: last.item.id, at: round3(lastOut) };
             },
             newOption: function (clip) {
-                return { id: uid(), label: '', clipId: clip ? clip.unique_id : null, color: '#ffffff' };
+                return {
+                    id: uid(), label: '', clipId: clip ? clip.unique_id : null, color: '#ffffff',
+                    then: { type: 'continue', targetId: null, ending: '' },
+                    setFlags: [], requires: null, whenLocked: 'hide'
+                };
             },
             addChoiceAt: function (t, clip) {
                 if (!this.layout.items.length) {
@@ -634,9 +695,10 @@
                 var point = {
                     id: uid(),
                     itemId: anchor.itemId,
-                    offset: anchor.offset,
+                    at: anchor.at,
                     prompt: '',
                     timeout: 0,
+                    mode: 'pause',
                     allowSkip: true,
                     defaultOptionId: null,
                     options: clip ? [this.newOption(clip)] : [this.newOption(null), this.newOption(null)]
@@ -688,7 +750,7 @@
                     var point = tl.choicePoints.find(function (p) { return p.id === pointId; });
                     if (!point) return;
                     point.itemId = anchor.itemId;
-                    point.offset = anchor.offset;
+                    point.at = anchor.at;
                 });
             },
             setPointField: function (point, field, value) {
@@ -707,6 +769,219 @@
             },
             setOptionClip: function (point, option, clipId) {
                 this.commit(function () { option.clipId = clipId || null; });
+            },
+            setOptionThen: function (point, option, type) {
+                this.commit(function () {
+                    option.then = { type: type, targetId: option.then.targetId, ending: option.then.ending };
+                });
+            },
+            setOptionJumpTarget: function (point, option, targetId) {
+                this.commit(function () { option.then.targetId = targetId || null; });
+            },
+            setOptionEnding: function (point, option, ending) {
+                this.commit(function () { option.then.ending = String(ending || '').trim().slice(0, 80); });
+            },
+            setOptionFlags: function (point, option, value) {
+                var flags = MovieCompiler.normalizeFlags(value);
+                this.commit(function () { option.setFlags = flags; });
+            },
+            setOptionRequires: function (point, option, value) {
+                var flag = MovieCompiler.normalizeFlag(value);
+                this.commit(function () { option.requires = flag ? { flag: flag, is: true } : null; });
+            },
+            setOptionWhenLocked: function (point, option, value) {
+                this.commit(function () { option.whenLocked = value === 'lock' ? 'lock' : 'hide'; });
+            },
+
+            // ---------------------------------------------------------- markers
+            markerTime: function (marker) {
+                var ml = this.markersLayout.find(function (x) { return x.marker.id === marker.id; });
+                return ml ? ml.time : 0;
+            },
+            addMarkerAt: function (t, type) {
+                if (!this.layout.items.length) {
+                    this.toast('Add a clip to the main movie first', 'error');
+                    return null;
+                }
+                var anchor = this.timeToAnchor(clamp(t, 0, this.totalDuration));
+                var marker = {
+                    id: uid(), itemId: anchor.itemId, at: anchor.at,
+                    type: type || 'chapter', label: '', targetId: null, condition: null, ending: ''
+                };
+                this.commit(function (tl) { tl.markers.push(marker); });
+                this.selection = { type: 'marker', id: marker.id };
+                return marker;
+            },
+            addMarkerAtPlayhead: function (type) {
+                if (this.addMarkerAt(this.playhead, type || 'chapter')) this.toast('Marker added at ' + fmtPrecise(this.playhead));
+            },
+            addMarkerInItem: function (entry, type) {
+                var inside = this.playhead >= entry.start && this.playhead < entry.end;
+                this.addMarkerAt(inside ? this.playhead : entry.start + entry.duration / 2, type);
+            },
+            selectMarker: function (markerId) {
+                this.selection = { type: 'marker', id: markerId };
+            },
+            removeMarker: function (markerId) {
+                this.commit(function (tl) {
+                    tl.markers = tl.markers.filter(function (m) { return m.id !== markerId; });
+                    // Clear jump targets that pointed at the deleted marker
+                    tl.markers.forEach(function (m) { if (m.targetId === markerId) m.targetId = null; });
+                    tl.choicePoints.forEach(function (p) {
+                        p.options.forEach(function (o) { if (o.then.targetId === markerId) o.then.targetId = null; });
+                    });
+                });
+                this.validateSelection();
+            },
+            moveMarkerTo: function (markerId, t) {
+                var anchor = this.timeToAnchor(clamp(Number(t) || 0, 0, this.totalDuration));
+                if (!anchor) return;
+                this.commit(function (tl) {
+                    var marker = tl.markers.find(function (m) { return m.id === markerId; });
+                    if (!marker) return;
+                    marker.itemId = anchor.itemId;
+                    marker.at = anchor.at;
+                });
+            },
+            setMarkerType: function (marker, type) {
+                this.commit(function () { marker.type = type; });
+            },
+            setMarkerTarget: function (marker, targetId) {
+                this.commit(function () { marker.targetId = targetId || null; });
+            },
+            setMarkerCondition: function (marker, value) {
+                var flag = MovieCompiler.normalizeFlag(value);
+                this.commit(function () { marker.condition = flag ? { flag: flag, is: true } : null; });
+            },
+
+            // ---------------------------------------------------------- titles (overlays)
+            addOverlayAt: function (t) {
+                if (!this.layout.items.length) {
+                    this.toast('Add a clip to the main movie first', 'error');
+                    return null;
+                }
+                var anchor = this.timeToAnchor(clamp(t, 0, this.totalDuration));
+                var overlay = { id: uid(), itemId: anchor.itemId, at: anchor.at, duration: 3, text: '', position: 'lower' };
+                this.commit(function (tl) { tl.overlays.push(overlay); });
+                this.selection = { type: 'overlay', id: overlay.id };
+                return overlay;
+            },
+            addOverlayAtPlayhead: function () {
+                if (this.addOverlayAt(this.playhead)) this.toast('Title added at ' + fmtPrecise(this.playhead));
+            },
+            addOverlayInItem: function (entry) {
+                var inside = this.playhead >= entry.start && this.playhead < entry.end;
+                this.addOverlayAt(inside ? this.playhead : entry.start + entry.duration / 2);
+            },
+            selectOverlay: function (overlayId) {
+                this.selection = { type: 'overlay', id: overlayId };
+            },
+            removeOverlay: function (overlayId) {
+                this.commit(function (tl) {
+                    tl.overlays = tl.overlays.filter(function (o) { return o.id !== overlayId; });
+                });
+                this.validateSelection();
+            },
+            moveOverlayTo: function (overlayId, t) {
+                var anchor = this.timeToAnchor(clamp(Number(t) || 0, 0, this.totalDuration));
+                if (!anchor) return;
+                this.commit(function (tl) {
+                    var overlay = tl.overlays.find(function (o) { return o.id === overlayId; });
+                    if (!overlay) return;
+                    overlay.itemId = anchor.itemId;
+                    overlay.at = anchor.at;
+                });
+            },
+            setOverlayDuration: function (overlay, value) {
+                this.commit(function () { overlay.duration = clamp(Number(value) || 3, 0.5, 600); });
+            },
+            setOverlayPosition: function (overlay, position) {
+                this.commit(function () { overlay.position = position; });
+            },
+
+            // ---------------------------------------------------------- trims
+            setItemTrim: function (item, which, value) {
+                var clip = this.clipMap.get(item.clipId);
+                if (!clip) return;
+                var dur = Number(clip.duration) || 0;
+                this.commit(function () {
+                    if (which === 'in') {
+                        item.in = round3(clamp(Number(value) || 0, 0, Math.max(0, (item.out === null ? dur : item.out) - 0.1)));
+                    } else {
+                        var out = clamp(Number(value) || 0, item.in + 0.1, dur);
+                        item.out = out >= dur - 0.0005 ? null : round3(out);
+                    }
+                });
+            },
+            resetItemTrim: function (item) {
+                this.commit(function () { item.in = 0; item.out = null; });
+            },
+
+            // ---------------------------------------------------------- captions
+            captionsFor: function (clipId) {
+                return this.captions[clipId] || null;
+            },
+            attachCaptions: function (clip) {
+                var self = this;
+                var input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.srt,.vtt,text/plain';
+                input.onchange = function () {
+                    var file = input.files && input.files[0];
+                    if (!file) return;
+                    var form = new FormData();
+                    form.append('projectId', String(self.projectId));
+                    form.append('file', file);
+                    fetch('/api/upload', { method: 'POST', body: form })
+                        .then(function (r) { return r.json(); })
+                        .then(function (up) {
+                            if (!up || !up.success) throw new Error((up && up.error) || 'Upload failed');
+                            return api('/api/clip/captions', { method: 'POST', body: { projectId: self.projectId, clipId: clip.unique_id, path: up.path, filename: file.name } });
+                        })
+                        .then(function (res) {
+                            return self.loadCaptions().then(function () {
+                                self.toast(res.count + ' caption' + (res.count === 1 ? '' : 's') + ' attached to \u201c' + self.displayName(clip) + '\u201d');
+                            });
+                        })
+                        .catch(function (err) { self.toast(err.message, 'error'); });
+                };
+                input.click();
+            },
+            removeCaptions: function (clip) {
+                var self = this;
+                api('/api/clip/captions/delete', { method: 'POST', body: { clipId: clip.unique_id } })
+                    .then(function () { return self.loadCaptions(); })
+                    .then(function () { self.toast('Captions removed'); })
+                    .catch(function (err) { self.toast(err.message, 'error'); });
+            },
+            loadCaptions: function () {
+                var self = this;
+                return api('/api/captions?projectId=' + this.projectId).then(function (rows) {
+                    var captions = {};
+                    (rows || []).forEach(function (row) {
+                        captions[row.clipId] = { filename: row.filename, path: row.path, cues: null };
+                    });
+                    // Parse each caption file for the preview
+                    var jobs = (rows || []).map(function (row) {
+                        return fetch(row.path).then(function (r) { return r.ok ? r.text() : ''; }).then(function (text) {
+                            captions[row.clipId].cues = MovieCompiler.parseCaptions(text);
+                        }).catch(function () { captions[row.clipId].cues = []; });
+                    });
+                    return Promise.all(jobs).then(function () { self.captions = captions; });
+                }).catch(function () { /* ignore */ });
+            },
+
+            // ---------------------------------------------------------- story check navigation
+            goToIssue: function (issue) {
+                if (!issue.target) return;
+                if (issue.target.type === 'choice') this.selection = { type: 'choice', id: issue.target.id };
+                else if (issue.target.type === 'marker') this.selection = { type: 'marker', id: issue.target.id };
+                else if (issue.target.type === 'overlay') this.selection = { type: 'overlay', id: issue.target.id };
+                else if (issue.target.type === 'item') this.selection = { type: 'item', id: issue.target.id };
+            },
+            pushSettingsEdit: function () {
+                this.pushHistory(this._settingsBefore || JSON.stringify(this.timeline));
+                this._settingsBefore = null;
             },
             previewPoint: function (point) {
                 var pl = this.pointsLayout.find(function (x) { return x.point.id === point.id; });
@@ -735,6 +1010,8 @@
                     if (detail.state !== 'choosing' && detail.state !== 'option') this.livePointId = null;
                 } else if (type === 'choice-shown') {
                     this.livePointId = detail.point.id;
+                } else if (type === 'jump') {
+                    this.toast('Jumped to ' + fmtPrecise(detail.to));
                 }
             },
             togglePlay: function () {
@@ -870,7 +1147,7 @@
                         var anchor = self.timeToAnchor(self.timeFromClientX(ev.clientX));
                         if (!anchor) return;
                         point.itemId = anchor.itemId;
-                        point.offset = anchor.offset;
+                        point.at = anchor.at;
                         self.drag = { kind: 'marker', pointId: point.id };
                     },
                     up: function () {
@@ -883,6 +1160,39 @@
                 if (!this.layout.items.length) return;
                 var t = this.timeFromClientX(event.clientX);
                 this.addChoiceAt(t);
+            },
+            onMarkerTrackDblClick: function (event) {
+                if (!this.layout.items.length) return;
+                this.addMarkerAt(this.timeFromClientX(event.clientX), 'chapter');
+            },
+            onOverlayTrackDblClick: function (event) {
+                if (!this.layout.items.length) return;
+                this.addOverlayAt(this.timeFromClientX(event.clientX));
+            },
+            onMarkerDotPointerDown: function (event, ml) {
+                if (event.button !== 0) return;
+                event.preventDefault();
+                var self = this;
+                var startX = event.clientX;
+                var dragging = false;
+                var before = JSON.stringify(this.timeline);
+                var marker = ml.marker;
+                this.selection = { type: 'marker', id: marker.id };
+                this.startPointerDrag({
+                    move: function (ev) {
+                        if (!dragging && Math.abs(ev.clientX - startX) > 3) dragging = true;
+                        if (!dragging) return;
+                        var anchor = self.timeToAnchor(self.timeFromClientX(ev.clientX));
+                        if (!anchor) return;
+                        marker.itemId = anchor.itemId;
+                        marker.at = anchor.at;
+                        self.drag = { kind: 'marker-dot', markerId: marker.id };
+                    },
+                    up: function () {
+                        self.drag = null;
+                        if (dragging) self.pushHistory(before);
+                    }
+                });
             },
 
             // ---------------------------------------------------------- drag & drop from the media bin
@@ -1229,6 +1539,8 @@
                 if (!this.exporter.title) this.exporter.title = project ? project.title : 'My interactive movie';
                 this.exporter.open = true;
                 this.exporter.error = '';
+                this.exporter.issues = this.issues;
+                this.exporter.stats = this.compiled.stats;
                 if (this.player) this.player.pause();
                 this.flushSave();
                 this.loadExports();
@@ -1249,6 +1561,8 @@
                     })
                     .then(function (res) {
                         ex.job = res.job;
+                        if (res.issues) ex.issues = res.issues;
+                        if (res.stats) ex.stats = res.stats;
                         self.pollJob(res.job.id);
                     })
                     .catch(function (err) { ex.error = err.message; });
@@ -1364,6 +1678,10 @@
                     if (key === 'Escape') this.closeExport();
                     return;
                 }
+                if (this.settingsOpen) {
+                    if (key === 'Escape') this.settingsOpen = false;
+                    return;
+                }
                 if (typing) return;
                 if (target.closest && target.closest('.ip-root')) return; // the player handles its own keys
 
@@ -1386,6 +1704,10 @@
                     this.togglePlay();
                 } else if (key === 'c' || key === 'C') {
                     this.addChoiceAtPlayhead();
+                } else if (key === 'm' || key === 'M') {
+                    this.addMarkerAtPlayhead('chapter');
+                } else if (key === 't' || key === 'T') {
+                    this.addOverlayAtPlayhead();
                 } else if (key === 'Delete' || key === 'Backspace') {
                     if (this.selection) {
                         event.preventDefault();

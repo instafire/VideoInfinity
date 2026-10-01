@@ -21,7 +21,23 @@ Open `http://localhost:3000` after starting the server.
    - when the clip ends, **the main movie resumes from the exact frame where it paused**.
 6. **Export** — the main track is stitched into a single MP4 (normalized resolution, frame rate and audio, frame-accurate A/V sync), choice clips are encoded alongside it, and a self-contained player is written to `public/exports/<name>/`. Upload that folder to any static host or open `index.html` directly — no CDN needed.
 
-Optional per choice: a question for viewers, a countdown timer (continue the movie or auto-play a default option when it runs out) and a *Continue watching* skip button. The timeline autosaves and supports undo/redo (`Ctrl+Z` / `Ctrl+Shift+Z`).
+### Story tools
+
+- **Branching options** — each option can go *back to the movie* (default), *jump to a marker* or *end the movie* with a named ending. Options don't need a clip: "Skip ahead" can just jump.
+- **Markers** (`M`) on their own track: **chapters** (shown as a badge and in the viewer's chapters menu, and used as jump targets), **jump** markers (when playback reaches them it jumps elsewhere) and **ending** markers.
+- **Flags** — options can set flags (e.g. `has_key`). Options can require a flag and be hidden or shown locked until it's set; jump and ending markers can apply only when a flag is set.
+- **Trim on the timeline** — set IN/OUT for any clip on the main track without cutting a new file. Choices, markers and titles stay on their frame.
+- **Titles** (`T`) — timed on-screen text (top, center, lower third or bottom).
+- **Captions** — attach an SRT or WebVTT file to any clip (`CC` button). Captions follow trims and play for option clips too.
+- **Timers** — continue the movie or auto-play a default option when time runs out. A choice can also *keep the movie playing* while viewers decide.
+- **Story check** — continuously flags parts of the movie no path can reach, endings that can't be reached, loops with no way out, broken jump targets and flags that are never set.
+- **Movie settings** — let viewers seek, show chapters, remember progress.
+
+The timeline autosaves and supports undo/redo (`Ctrl+Z` / `Ctrl+Shift+Z`).
+
+### The player
+
+Exports use a dependency-free player built for this format: hover previews on choice cards, resume at the exact frame after an option, jumps and endings, locked options, chapters menu, captions toggle, an endings list on the end screen, and **resume where you left off** (saved in the viewer's browser). It also stops a story that would loop forever instead of hanging.
 
 ## 🧰 Classic tools
 
@@ -70,7 +86,7 @@ Then open `http://localhost:3000`.
 ### Tests
 
 ```bash
-npm test          # API end-to-end test: upload -> cut -> timeline -> render -> verify export
+npm test          # compiler unit tests + API end-to-end test (upload -> cut -> timeline -> render -> verify export)
 npm run test:e2e  # legacy Playwright UI test (requires @playwright/test)
 ```
 
@@ -84,10 +100,10 @@ VideoInfinity/
 ├── server.js              # Entry point (loads server_new.js)
 ├── public/
 │   ├── studio/            # Timeline Studio (index.html, app.js, styles.css)
-│   ├── player/            # Interactive player shared by the studio preview and exports
+│   ├── player/            # Interactive player + movie compiler shared by the studio, server and tests
 │   └── index.html         # Classic studio (served at /classic)
 ├── public_new/            # Earlier experimental v2 UI (not served)
-├── test/timeline.test.js  # API end-to-end test
+├── test/                  # compiler unit tests + API end-to-end test
 ├── docs/                  # Design specifications and architecture notes
 └── package.json
 ```
@@ -102,6 +118,9 @@ VideoInfinity/
 - `POST /api/timeline` — save `{ projectId, timeline: { items, choicePoints } }`
 - `POST /api/timeline/render` — start an export `{ projectId, title, resolution }` → `{ job }`
 - `GET /api/render_jobs/:id` — export progress (`queued` → `rendering` → `done` with `url`)
+- `GET /api/captions?projectId=` — captions attached to clips
+- `POST /api/clip/captions` — attach an uploaded `.srt`/`.vtt` to a clip `{ projectId, clipId, path }`
+- `POST /api/clip/captions/delete` — remove a clip's captions
 
 **Media & projects**
 

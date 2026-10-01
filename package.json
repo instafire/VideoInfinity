@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "start:v2": "node server_new.js",
-    "test": "node test/timeline.test.js",
+    "test": "node test/compiler.test.js && node test/timeline.test.js",
     "test:e2e": "node phase1-e2e.js"
   },
   "keywords": [

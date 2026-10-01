@@ -45,6 +45,8 @@ public/audio/*
 !public/audio/.gitkeep
 public/images/*
 !public/images/.gitkeep
+public/captions/*
+!public/captions/.gitkeep
 
 public_new/videos/*
 !public_new/videos/.gitkeep

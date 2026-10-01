@@ -193,9 +193,9 @@ async function main() {
             assert.equal(manifest.segments.length, 1, 'main track is a single stitched file');
             assert.equal(manifest.choicePoints.length, 1);
             assert.ok(Math.abs(manifest.choicePoints[0].time - 1) < 0.05);
-            assert.equal(manifest.choicePoints[0].options.length, 1, 'options without a clip are skipped');
+            assert.equal(manifest.choicePoints[0].options.length, 2, 'the continue option with no clip is kept (it resumes the movie)');
             const main = path.join(dir, manifest.segments[0].src);
-            const opt = path.join(dir, manifest.choicePoints[0].options[0].src);
+            const opt = path.join(dir, manifest.choicePoints[0].options[0].clip.src);
             assert.ok(Math.abs(probeDuration(main) - 5) < 0.1, 'main.mp4 is 2s + 3s');
             assert.ok(Math.abs(probeDuration(opt) - 2) < 0.1, 'option clip encoded');
             const html = fs.readFileSync(path.join(dir, 'index.html'), 'utf8');

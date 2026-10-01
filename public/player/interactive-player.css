@@ -227,7 +227,78 @@
 }
 .ip-card-video { opacity: 0; transition: opacity 0.2s ease; }
 .ip-card.ip-previewing .ip-card-video, .ip-no-poster .ip-card-video { opacity: 1; }
-.ip-card-pill, .ip-card-key, .ip-card-duration {
+/* ---------- Chapter badge, titles, captions ---------- */
+.ip-chapter-badge {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    z-index: 8;
+    max-width: calc(100% - 28px);
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: rgba(2, 6, 23, 0.66);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.85);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+}
+.ip-root.ip-state-option .ip-chapter-badge { display: none; }
+
+.ip-title-card {
+    position: absolute;
+    left: 50%;
+    z-index: 8;
+    max-width: min(88%, 720px);
+    padding: 12px 22px;
+    border-radius: 14px;
+    background: rgba(2, 6, 23, 0.62);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    font-size: clamp(15px, 2.6cqw, 30px);
+    font-weight: 700;
+    line-height: 1.3;
+    text-align: center;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.6);
+    transform: translateX(-50%);
+    pointer-events: none;
+    animation: ip-title-in 0.35s ease;
+    white-space: pre-line;
+}
+.ip-title-card.ip-pos-top { top: 8%; }
+.ip-title-card.ip-pos-center { top: 50%; transform: translate(-50%, -50%); }
+.ip-title-card.ip-pos-lower { bottom: 18%; }
+.ip-title-card.ip-pos-bottom { bottom: 9%; }
+@keyframes ip-title-in { from { opacity: 0; transform: translateX(-50%) translateY(8px); } }
+.ip-title-card.ip-pos-center { animation-name: ip-title-in-center; }
+@keyframes ip-title-in-center { from { opacity: 0; transform: translate(-50%, -50%) translateY(8px); } }
+
+.ip-caption {
+    position: absolute;
+    left: 50%;
+    bottom: 52px;
+    z-index: 8;
+    max-width: min(90%, 760px);
+    padding: 4px 12px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.72);
+    font-size: clamp(13px, 2.2cqw, 22px);
+    line-height: 1.4;
+    text-align: center;
+    transform: translateX(-50%);
+    pointer-events: none;
+    white-space: pre-line;
+}
+.ip-root.ip-state-option .ip-caption { bottom: 20px; }
+
+/* ---------- Choice overlay ---------- */
+.ip-card-pill, .ip-card-key, .ip-card-duration, .ip-card-lock {
     position: absolute;
     z-index: 2;
     border-radius: 6px;
@@ -282,6 +353,29 @@
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+.ip-card-icon {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: rgba(255, 255, 255, 0.85);
+}
+.ip-card-icon svg { width: 34%; height: 34%; }
+.ip-card-lock {
+    inset: 0;
+    display: grid;
+    place-items: center;
+    border-radius: 0;
+    background: rgba(2, 6, 23, 0.55);
+    color: rgba(255, 255, 255, 0.9);
+}
+.ip-card-lock svg { width: 30px; height: 30px; }
+.ip-card.ip-locked { cursor: not-allowed; filter: grayscale(0.7) brightness(0.75); }
+.ip-card.ip-locked:hover { transform: none; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), inset 0 0 0 2px rgba(255, 255, 255, 0.12); }
+
+/* Keep-playing choices: the movie runs behind a lighter overlay */
+.ip-choice.ip-choice-live { background: linear-gradient(to top, rgba(2, 6, 23, 0.88) 0%, rgba(2, 6, 23, 0.35) 45%, transparent 75%); }
+.ip-root.ip-state-choosing .ip-choice-live ~ .ip-controls { opacity: 1; pointer-events: auto; }
 .ip-choice-skip {
     appearance: none;
     padding: 6px 12px;
@@ -422,6 +516,103 @@
     cursor: pointer;
 }
 .ip-end-replay svg { width: 18px; height: 18px; }
+.ip-end-buttons { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+.ip-end-endings {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 18px;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 999px;
+    background: transparent;
+    color: #fff;
+    font-weight: 700;
+    cursor: pointer;
+}
+.ip-end-endings:hover { background: rgba(255, 255, 255, 0.12); }
+.ip-end-endings svg { width: 18px; height: 18px; }
+.ip-endings {
+    width: min(92%, 420px);
+    max-height: 45%;
+    overflow-y: auto;
+    padding: 14px;
+    border-radius: 14px;
+    background: rgba(2, 6, 23, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+}
+.ip-endings-title { font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: rgba(255, 255, 255, 0.55); margin-bottom: 8px; }
+.ip-endings-list { display: flex; flex-direction: column; gap: 4px; }
+.ip-ending-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; font-size: 14px; }
+.ip-ending-row.is-found { color: #fff; }
+.ip-ending-row.is-missing { color: rgba(255, 255, 255, 0.4); }
+.ip-ending-icon {
+    flex: none;
+    width: 20px;
+    height: 20px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    font-size: 12px;
+    font-weight: 700;
+}
+.is-found .ip-ending-icon { background: rgba(34, 197, 94, 0.25); color: #4ade80; }
+.is-missing .ip-ending-icon { background: rgba(255, 255, 255, 0.08); }
+
+/* Resume button on the start screen */
+.ip-start-resume {
+    appearance: none;
+    padding: 10px 22px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+}
+.ip-start-resume:hover { background: rgba(255, 255, 255, 0.18); }
+
+/* Chapters menu */
+.ip-chapters-menu {
+    position: absolute;
+    right: 10px;
+    bottom: 52px;
+    z-index: 26;
+    width: min(280px, calc(100% - 20px));
+    max-height: 60%;
+    display: flex;
+    flex-direction: column;
+    border-radius: 12px;
+    background: rgba(2, 6, 23, 0.92);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+}
+.ip-chapters-title { padding: 10px 14px 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255, 255, 255, 0.55); }
+.ip-chapters-list { overflow-y: auto; padding: 0 6px 8px; }
+.ip-chapter-row {
+    appearance: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.ip-chapter-row:hover, .ip-chapter-row:focus-visible { background: rgba(255, 255, 255, 0.1); outline: none; }
+.ip-chapter-row.is-current { color: var(--ip-accent); }
+.ip-chapter-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.ip-chapter-time { flex: none; font-size: 11px; font-variant-numeric: tabular-nums; color: rgba(255, 255, 255, 0.55); }
+.ip-btn.ip-on { color: var(--ip-accent); }
+.ip-progress.ip-no-seek { cursor: default; }
+.ip-marker-chapter { background: #93c5fd; border-radius: 50%; transform: none; width: 7px; height: 7px; top: -3.5px; margin-left: -3.5px; border-width: 1px; }
 
 /* ---------- Spinner / messages ---------- */
 .ip-spinner {
