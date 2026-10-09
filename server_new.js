@@ -2,12 +2,14 @@ const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 const fs = require('fs-extra');
+const fsPromises = require('node:fs/promises');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
 const multer = require('multer');
 const rateLimit = require('express-rate-limit');
+const { isLoopbackHost, resolveInside, isAllowedUpload, validateMagicBytes } = require('./server-security');
 
 // --- SECURITY UTILITIES ---
 
@@ -25,59 +27,16 @@ function escapeHtml(str) {
     return str.replace(/[&<>"'\/]/g, char => htmlEscapes[char] || char);
 }
 
-// FIX 2: Path validation to prevent path traversal attacks
 function safePath(baseDir, userPath) {
-    const base = path.resolve(baseDir);
-    const resolved = path.resolve(baseDir, userPath);
-    if (!resolved.startsWith(base)) {
-        return null; // Path traversal attempt detected
-    }
-    return resolved;
-}
-
-// FIX 3: File magic byte validation
-const MAGIC_BYTES = {
-    'video/mp4': [0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70], // mp4
-    'video/avi': [0x52, 0x49, 0x46, 0x46], // AVI
-    'video/quicktime': [0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70], // MOV
-    'video/x-matroska': [0x1A, 0x45, 0xDF, 0xA3], // MKV
-    'video/webm': [0x1A, 0x45, 0xDF, 0xA3], // WebM
-    'audio/mpeg': [0x49, 0x44, 0x33], // MP3
-    'audio/wav': [0x52, 0x49, 0x46, 0x46], // WAV (also RIFF)
-    'audio/ogg': [0x4F, 0x67, 0x67, 0x53], // OGG
-    'audio/mp4': [0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70], // M4A
-    'audio/aac': [0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70], // AAC
-    'image/jpeg': [0xFF, 0xD8, 0xFF], // JPG
-    'image/png': [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A], // PNG
-    'image/gif': [0x47, 0x49, 0x46, 0x38] // GIF
-};
-
-function validateMagicBytes(buffer, mimetype) {
-    if (mimetype === 'image/webp') {
-        return buffer[0] === 0x52
-            && buffer[1] === 0x49
-            && buffer[2] === 0x46
-            && buffer[3] === 0x46
-            && buffer[8] === 0x57
-            && buffer[9] === 0x45
-            && buffer[10] === 0x42
-            && buffer[11] === 0x50;
-    }
-    const magic = MAGIC_BYTES[mimetype];
-    if (!magic) return true; // No validation for unknown types
-
-    for (let i = 0; i < magic.length; i++) {
-        if (buffer[i] !== magic[i]) {
-            return false;
-        }
-    }
-    return true;
+    return resolveInside(baseDir, userPath);
 }
 
 // FIX 6: Input validation
 function validateProjectId(id) {
-    const num = parseInt(id, 10);
-    return !isNaN(num) && num > 0 && num < 2147483647;
+    const num = typeof id === 'number'
+        ? id
+        : (typeof id === 'string' && /^\d+$/.test(id) ? Number(id) : NaN);
+    return Number.isSafeInteger(num) && num > 0 && num < 2147483647;
 }
 
 function validateUuid(id) {
@@ -402,7 +361,14 @@ try {
 }
 // -------------------------------------
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '127.0.0.1';
+if (!isLoopbackHost(HOST)) {
+    throw new Error('HOST must be localhost, 127.0.0.1, or ::1; this unauthenticated server is local-only');
+}
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+    throw new Error('PORT must be an integer between 1 and 65535');
+}
 const app = express();
 
 // FIX 4: Restrict CORS to specific origins (configure as needed)
@@ -429,6 +395,12 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+});
 
 // FIX 5: Rate limiting to prevent DoS attacks
 const limiter = rateLimit({
@@ -436,8 +408,7 @@ const limiter = rateLimit({
     max: 1000, // Limit each IP to 1000 requests per windowMs (increased for video editing)
     message: { error: 'Too many requests, please try again later.' },
     standardHeaders: true,
-    legacyHeaders: false,
-    trustProxy: 1
+    legacyHeaders: false
 });
 
 // Stricter limiter for upload endpoints
@@ -446,12 +417,12 @@ const uploadLimiter = rateLimit({
     max: 100, // Increased from 20 for bulk operations
     message: { error: 'Too many upload requests, please try again later.' },
     standardHeaders: true,
-    legacyHeaders: false,
-    trustProxy: 1
+    legacyHeaders: false
 });
 
 app.use(limiter);
 app.use(express.json({ limit: '10mb' }));
+app.use(express.static(path.join(__dirname, 'public_new')));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // 1. SETUP FOLDERS
@@ -460,7 +431,7 @@ folders.forEach(f => fs.ensureDirSync(path.join(__dirname, 'public', f)));
 
 // 2. DATABASE INIT
 let db;
-(async () => {
+const dbReady = (async () => {
     db = await open({ filename: './database.sqlite', driver: sqlite3.Database });
     
     // Core Tables
@@ -552,24 +523,12 @@ const storage = multer.diskStorage({
         fs.ensureDirSync(path.join(__dirname, dest));
         cb(null, path.join(__dirname, dest));
     },
-    filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
+    filename: (req, file, cb) => cb(null, `${uuidv4()}${path.extname(file.originalname).toLowerCase()}`)
 });
 
 const fileFilter = (req, file, cb) => {
-    const videoTypes = /mp4|avi|mov|mkv|webm/;
-    const audioTypes = /mp3|wav|ogg|m4a|aac/;
-    const imageTypes = /jpg|jpeg|png|gif|webp/;
-    const ext = path.extname(file.originalname).toLowerCase().slice(1);
-    
-    if (file.mimetype.startsWith('video') && videoTypes.test(ext)) {
-        cb(null, true);
-    } else if (file.mimetype.startsWith('audio') && audioTypes.test(ext)) {
-        cb(null, true);
-    } else if (file.mimetype.startsWith('image') && imageTypes.test(ext)) {
-        cb(null, true);
-    } else {
-        cb(new Error('Invalid file type. Only video, audio, and image files are allowed.'));
-    }
+    if (isAllowedUpload(file.mimetype, file.originalname)) return cb(null, true);
+    cb(new Error('Invalid file type. Only supported video, audio, and image formats are allowed.'));
 };
 
 const upload = multer({ 
@@ -1035,9 +994,11 @@ app.get('/api/exports', async (req, res) => {
 
 app.post('/api/delete_export', async (req, res) => {
     try {
-        // FIX 2: Path validation to prevent path traversal
-        const cleanName = path.basename(req.body.name);
-        const targetPath = safePath(path.join(__dirname, 'public/exports'), cleanName);
+        const name = req.body?.name;
+        if (typeof name !== 'string' || !/^[a-z0-9_-]{1,240}$/i.test(name)) {
+            return res.status(400).json({ error: 'Invalid export name' });
+        }
+        const targetPath = safePath(path.join(__dirname, 'public/exports'), name);
         if (!targetPath) {
             return res.status(400).json({ error: 'Invalid path' });
         }
@@ -1051,84 +1012,94 @@ app.post('/api/delete_export', async (req, res) => {
 });
 
 app.post('/api/upload', uploadLimiter, upload.single('file'), async (req, res) => {
-    // FIX: Validate projectId properly - default to 1 only if not provided
-    let projectId = req.body.projectId;
-    if (!projectId) projectId = 1;
-    if (!validateProjectId(projectId)) {
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file' });
+    const removeUpload = () => fs.remove(file.path).catch(() => {});
+    const projectId = req.body.projectId ? Number(req.body.projectId) : 1;
+
+    if (!Number.isSafeInteger(projectId) || projectId <= 0 || projectId >= 2147483647) {
+        await removeUpload();
         return res.status(400).json({ error: 'Invalid project ID' });
     }
-    if (!req.file) return res.status(400).json({ error: "No file" });
 
-    // FIX 3: Validate magic bytes for uploaded files
     try {
-        const buffer = await fs.readFile(req.file.path, { length: 16 });
-        if (!validateMagicBytes(buffer, req.file.mimetype)) {
-            await fs.unlink(req.file.path).catch(() => {});
+        const project = await db.get('SELECT id FROM projects WHERE id = ?', [projectId]);
+        if (!project) {
+            await removeUpload();
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        let validContent = false;
+        const fileHandle = await fsPromises.open(file.path, 'r');
+        try {
+            const sample = Buffer.alloc(16);
+            const { bytesRead } = await fileHandle.read(sample, 0, sample.length, 0);
+            validContent = validateMagicBytes(sample.subarray(0, bytesRead), file.mimetype);
+        } finally {
+            await fileHandle.close();
+        }
+        if (!validContent) {
+            await removeUpload();
             return res.status(400).json({ error: 'Invalid file content' });
         }
-    } catch (err) {
-        console.error('Magic byte validation error:', err);
-        return res.status(400).json({ error: 'File validation failed' });
-    }
 
-    try {
-        if(req.file.mimetype.startsWith('audio')) {
-            return res.json({
-                success: true,
-                type: 'audio',
-                path: `/audio/${req.file.filename}`,
-                name: req.file.originalname
-            });
+        const mimeType = file.mimetype.split(';', 1)[0].trim().toLowerCase();
+        if (mimeType.startsWith('audio/')) {
+            return res.json({ success: true, type: 'audio', path: `/audio/${file.filename}`, name: file.originalname });
+        }
+        if (mimeType.startsWith('image/')) {
+            return res.json({ success: true, type: 'image', path: `/images/${file.filename}`, name: file.originalname });
         }
 
-        if(req.file.mimetype.startsWith('image')) {
-            return res.json({
-                success: true,
-                type: 'image',
-                path: `/images/${req.file.filename}`,
-                name: req.file.originalname
+        const webPath = `/videos/${file.filename}`;
+        let metadata;
+        try {
+            metadata = await new Promise((resolve, reject) => {
+                ffmpeg.ffprobe(file.path, (err, data) => err ? reject(err) : resolve(data));
             });
-        }
-
-        const filename = req.file.filename;
-        const webPath = `/videos/${filename}`;
-
-        // FIX: Use promise wrapper for ffprobe to avoid async callback issues
-        const metadata = await new Promise((resolve, reject) => {
-            ffmpeg.ffprobe(req.file.path, (err, data) => {
-                if (err) reject(err);
-                else resolve(data);
-            });
-        }).catch(err => {
+        } catch (err) {
             console.error('FFprobe error:', err);
-            return res.status(500).json({ error: 'Failed to process video' });
-        });
+            await removeUpload();
+            return res.status(422).json({ error: 'Unable to process this video file' });
+        }
 
-        if (!metadata) return; // Error already sent
+        const duration = Number(metadata?.format?.duration);
+        if (!Number.isFinite(duration) || duration <= 0) {
+            await removeUpload();
+            return res.status(422).json({ error: 'Unable to read video duration' });
+        }
 
-        const duration = metadata ? metadata.format.duration : 0;
-        const thumbnail = await generateThumbnail(req.file.path, filename);
-
-        // FIX: Add transaction for atomic operations
+        const thumbnail = await generateThumbnail(file.path, file.filename);
+        let transactionStarted = false;
         try {
             await db.exec('BEGIN TRANSACTION');
-            const result = await db.run('INSERT INTO videos (project_id, filename, filepath, thumbnail, duration) VALUES (?, ?, ?, ?, ?)',
-                [projectId, req.file.originalname, webPath, thumbnail, duration]);
-
+            transactionStarted = true;
+            const result = await db.run(
+                'INSERT INTO videos (project_id, filename, filepath, thumbnail, duration) VALUES (?, ?, ?, ?, ?)',
+                [projectId, file.originalname, webPath, thumbnail, duration]
+            );
             const clipId = uuidv4();
-            await db.run('INSERT INTO clips (unique_id, project_id, name, filepath, thumbnail, source_video_id, duration, x, y) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                [clipId, projectId, `FULL: ${req.file.originalname}`, webPath, thumbnail, result.lastID, duration, 100, 100]);
-
+            await db.run(
+                'INSERT INTO clips (unique_id, project_id, name, filepath, thumbnail, source_video_id, duration, x, y) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [clipId, projectId, `FULL: ${file.originalname}`, webPath, thumbnail, result.lastID, duration, 100, 100]
+            );
             await db.exec('COMMIT');
-            res.json({ success: true, type: 'video' });
-        } catch(dbErr) {
-            await db.exec('ROLLBACK');
-            console.error('Database error:', dbErr);
-            res.status(500).json({ error: 'Failed to save video to database' });
+            transactionStarted = false;
+            return res.json({ success: true, type: 'video' });
+        } catch (err) {
+            if (transactionStarted) await db.exec('ROLLBACK').catch(() => {});
+            await removeUpload();
+            if (thumbnail) {
+                const thumbnailPath = resolveInside(path.join(__dirname, 'public'), thumbnail);
+                if (thumbnailPath) await fs.remove(thumbnailPath).catch(() => {});
+            }
+            console.error('Database error:', err);
+            return res.status(500).json({ error: 'Failed to save video to database' });
         }
-    } catch(err) {
+    } catch (err) {
+        await removeUpload();
         console.error('Upload error:', err);
-        res.status(500).json({ error: 'Upload failed' });
+        return res.status(500).json({ error: 'Upload failed' });
     }
 });
 
@@ -1189,8 +1160,8 @@ app.post('/api/delete_clips_bulk', async (req, res) => {
                 continue;
             }
             try {
-                const filepath = path.join(__dirname, 'public', clip.filepath);
-                if (await fs.pathExists(filepath)) {
+                const filepath = safePath(path.join(__dirname, 'public'), clip.filepath);
+                if (filepath && await fs.pathExists(filepath)) {
                     await fs.unlink(filepath);
                 }
             } catch (e) {
@@ -1319,8 +1290,8 @@ app.post('/api/clip', async (req, res) => {
             return res.status(404).json({ error: 'Source video not found' });
         }
         
-        const sourcePath = path.join(__dirname, 'public', video.filepath);
-        if (!await fs.pathExists(sourcePath)) {
+        const sourcePath = safePath(path.join(__dirname, 'public'), video.filepath);
+        if (!sourcePath || !await fs.pathExists(sourcePath)) {
             return res.status(404).json({ error: 'Source video file not found' });
         }
         
@@ -1434,8 +1405,8 @@ app.post('/api/create_event_clip', async (req, res) => {
             return res.status(404).json({ error: 'Source video not found' });
         }
         
-        const sourcePath = path.join(__dirname, 'public', video.filepath);
-        if (!await fs.pathExists(sourcePath)) {
+        const sourcePath = safePath(path.join(__dirname, 'public'), video.filepath);
+        if (!sourcePath || !await fs.pathExists(sourcePath)) {
             return res.status(404).json({ error: 'Source video file not found' });
         }
         
@@ -1788,35 +1759,36 @@ app.post('/api/publish', async (req, res) => {
 
         // Copy files and update paths
         for (const clip of clips) {
-            const src = path.join(__dirname, 'public', clip.filepath); 
-            const filename = path.basename(clip.filepath); 
-            const dest = path.join(exportPath, 'clips', filename);
-            
-            if(await fs.pathExists(src)) { 
-                await fs.copy(src, dest); 
-                clip.filepath = `clips/${filename}`; 
+            const src = safePath(path.join(__dirname, 'public'), clip.filepath);
+            if (src && await fs.pathExists(src)) {
+                const filename = path.basename(src);
+                await fs.copy(src, path.join(exportPath, 'clips', filename));
+                clip.filepath = `clips/${filename}`;
+            } else {
+                clip.filepath = '';
             }
             
             if(clip.thumbnail) { 
-                const thumbName = path.basename(clip.thumbnail); 
-                const thumbSrc = path.join(__dirname, 'public', clip.thumbnail);
-                if(await fs.pathExists(thumbSrc)) { 
-                    await fs.copy(thumbSrc, path.join(exportPath, 'clips', thumbName)); 
-                    clip.thumbnail = `clips/${thumbName}`; 
-                } 
+                const thumbSrc = safePath(path.join(__dirname, 'public'), clip.thumbnail);
+                if (thumbSrc && await fs.pathExists(thumbSrc)) {
+                    const thumbName = path.basename(thumbSrc);
+                    await fs.copy(thumbSrc, path.join(exportPath, 'clips', thumbName));
+                    clip.thumbnail = `clips/${thumbName}`;
+                } else {
+                    clip.thumbnail = '';
+                }
             }
             
             // --- FIX 9: ROBUST PATH HANDLING ---
             if(clip.bg_music) { 
-                // Handle cases where path might be absolute or relative or hardcoded
-                const cleanPath = clip.bg_music.replace(/^\/+/, ''); // Remove leading slashes
-                const audSrc = path.join(__dirname, 'public', cleanPath); 
-                const audName = path.basename(clip.bg_music); 
-                
-                if(await fs.pathExists(audSrc)) { 
-                    await fs.copy(audSrc, path.join(exportPath, 'audio', audName)); 
-                    clip.bg_music = `audio/${audName}`; 
-                } 
+                const audSrc = safePath(path.join(__dirname, 'public'), clip.bg_music);
+                if (audSrc && await fs.pathExists(audSrc)) {
+                    const audName = path.basename(audSrc);
+                    await fs.copy(audSrc, path.join(exportPath, 'audio', audName));
+                    clip.bg_music = `audio/${audName}`;
+                } else {
+                    clip.bg_music = null;
+                }
             }
         }
 
@@ -2760,8 +2732,20 @@ app.post('/api/publish', async (req, res) => {
 
 app.use((err, req, res, next) => {
     console.error('Server error:', err);
+    if (err instanceof multer.MulterError) {
+        const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+        return res.status(status).json({ error: status === 413 ? 'Upload exceeds the file-size limit' : 'Upload rejected' });
+    }
+    if (err.message?.startsWith('Invalid file type.')) {
+        return res.status(400).json({ error: 'Unsupported upload type' });
+    }
     // FIX 7: Don't expose err.message in production
     res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => console.log(`Studio Infinity v20.13 (Optimized) Running: http://localhost:${PORT}`));
+dbReady.then(() => {
+    app.listen(PORT, HOST, () => console.log(`Studio Infinity v20.13 (Optimized) Running: http://${HOST}:${PORT}`));
+}).catch((err) => {
+    console.error('Database initialization failed; server was not started.', err);
+    process.exit(1);
+});

@@ -91,6 +91,15 @@ Video Infinity is a full-featured, local-first interactive video creator and bra
    http://localhost:3000
    ```
 
+   Both server entry points bind to `127.0.0.1` by default and reject non-loopback `HOST` values because the API has no user authentication. `PORT` can select another local port. For remote use, put an authenticated network-facing proxy in front of the app rather than exposing either server directly.
+
+### Tests
+
+- `npm test` runs the dependency-free Node security regression tests.
+- Install the browser once with `npx playwright install chromium` for either browser suite.
+- `npm run test:e2e` launches the classic server with a temporary database and checks its browser flow without touching the working database.
+- Start `npm run start:v2` in one terminal, then run `npm run test:v2` to exercise the modular studio views. Set `APP_URL` or `PORT` if the server is not at `http://127.0.0.1:3000`.
+
 ---
 
 ## 📁 Repository Structure

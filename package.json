@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "start:v2": "node server_new.js",
-    "test": "node phase1-e2e.js"
+    "test": "node --test tests/*.test.js",
+    "test:e2e": "node phase1-e2e.js",
+    "test:v2": "playwright test --config=playwright.config.js"
   },
   "keywords": [
     "interactive-video",
@@ -33,5 +35,8 @@
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7",
     "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.0"
   }
 }
