@@ -4,15 +4,28 @@ const { open } = require('sqlite');
 const fs = require('fs-extra');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const cors = require('cors');
+const fsPromises = require('node:fs/promises');
 const ffmpeg = require('fluent-ffmpeg');
 const multer = require('multer');
+const { escapeHtml, isLoopbackHost, resolveInside, isAllowedUpload, safeJsonForHtml, validateMagicBytes } = require('./server-security');
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '127.0.0.1';
+if (!isLoopbackHost(HOST)) {
+    throw new Error('HOST must be localhost, 127.0.0.1, or ::1; this unauthenticated server is local-only');
+}
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+    throw new Error('PORT must be an integer between 1 and 65535');
+}
 const app = express();
 
-app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 // 1. SETUP FOLDERS
@@ -21,7 +34,7 @@ folders.forEach(f => fs.ensureDirSync(path.join(__dirname, 'public', f)));
 
 // 2. DATABASE INIT
 let db;
-(async () => {
+const dbReady = (async () => {
     db = await open({ filename: './database.sqlite', driver: sqlite3.Database });
     
     // Core Tables
@@ -60,11 +73,20 @@ let db;
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const dest = file.mimetype.startsWith('audio') ? 'public/audio' : 'public/videos';
+        fs.ensureDirSync(path.join(__dirname, dest));
         cb(null, path.join(__dirname, dest));
     },
-    filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
+    filename: (req, file, cb) => cb(null, `${uuidv4()}${path.extname(file.originalname).toLowerCase()}`)
 });
-const upload = multer({ storage });
+const upload = multer({
+    storage,
+    fileFilter: (req, file, cb) => {
+        const allowed = isAllowedUpload(file.mimetype, file.originalname)
+            && (file.mimetype.startsWith('video/') || file.mimetype.startsWith('audio/'));
+        cb(allowed ? null : new Error('Unsupported upload type'), allowed);
+    },
+    limits: { fileSize: 2000 * 1024 * 1024 }
+});
 
 const generateThumbnail = (inputPath, filename, timestamp = '20%') => {
     return new Promise((resolve) => {
@@ -78,7 +100,15 @@ const generateThumbnail = (inputPath, filename, timestamp = '20%') => {
 // --- ROUTES ---
 app.get('/api/projects', async (req, res) => { const rows = await db.all('SELECT * FROM projects ORDER BY id DESC'); res.json(rows); });
 app.post('/api/projects', async (req, res) => { await db.run('INSERT INTO projects (title) VALUES (?)', [req.body.title]); res.json({success:true}); });
-app.post('/api/project/settings', async (req, res) => { await db.run('UPDATE projects SET theme_color = ? WHERE id = ?', [req.body.color, req.body.id]); res.json({success:true}); });
+app.post('/api/project/settings', async (req, res) => {
+    const projectId = Number(req.body?.id);
+    const color = req.body?.color;
+    if (!Number.isSafeInteger(projectId) || projectId <= 0 || !/^#[\da-f]{6}$/i.test(color || '')) {
+        return res.status(400).json({ error: 'Invalid project ID or theme color' });
+    }
+    await db.run('UPDATE projects SET theme_color = ? WHERE id = ?', [color, projectId]);
+    res.json({ success: true });
+});
 
 // --- STATS ROUTES ---
 app.post('/api/analytics/track', async (req, res) => { await db.run('INSERT INTO analytics (project_id, choice_label, target_clip_id) VALUES (?, ?, ?)', [req.body.projectId, req.body.label, req.body.target]); res.json({success: true}); });
@@ -102,22 +132,97 @@ app.get('/api/exports', async (req, res) => {
         res.json(builds.reverse());
     } catch (e) { res.json([]); }
 });
-app.post('/api/delete_export', async (req, res) => { try { await fs.remove(path.join(__dirname, 'public/exports', req.body.name)); res.json({ success: true }); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.post('/api/delete_export', async (req, res) => {
+    const targetPath = resolveInside(path.join(__dirname, 'public/exports'), req.body?.name);
+    if (!targetPath) return res.status(400).json({ error: 'Invalid export path' });
+    try {
+        await fs.remove(targetPath);
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Export deletion failed:', err);
+        res.status(500).json({ error: 'Failed to delete export' });
+    }
+});
 
 app.post('/api/upload', upload.single('file'), async (req, res) => {
-    const projectId = req.body.projectId || 1;
-    if (!req.file) return res.status(400).json({ error: "No file" });
-    if(req.file.mimetype.startsWith('audio')) return res.json({ success: true, type: 'audio', path: `/audio/${req.file.filename}`, name: req.file.originalname });
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file' });
+    const removeUpload = () => fs.remove(file.path).catch(() => {});
+    const projectId = req.body.projectId ? Number(req.body.projectId) : 1;
 
-    const filename = req.file.filename; const webPath = `/videos/${filename}`;
-    ffmpeg.ffprobe(req.file.path, async (err, metadata) => {
-        const duration = metadata ? metadata.format.duration : 0;
-        const thumbnail = await generateThumbnail(req.file.path, filename);
-        const result = await db.run('INSERT INTO videos (project_id, filename, filepath, thumbnail, duration) VALUES (?, ?, ?, ?, ?)', [projectId, req.file.originalname, webPath, thumbnail, duration]);
-        const clipId = uuidv4();
-        await db.run('INSERT INTO clips (unique_id, project_id, name, filepath, thumbnail, source_video_id, duration, x, y) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [clipId, projectId, `FULL: ${req.file.originalname}`, webPath, thumbnail, result.lastID, duration, 100, 100]);
-        res.json({ success: true, type: 'video' });
-    });
+    if (!Number.isSafeInteger(projectId) || projectId <= 0 || projectId >= 2147483647) {
+        await removeUpload();
+        return res.status(400).json({ error: 'Invalid project ID' });
+    }
+
+    try {
+        const project = await db.get('SELECT id FROM projects WHERE id = ?', [projectId]);
+        if (!project) {
+            await removeUpload();
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const fileHandle = await fsPromises.open(file.path, 'r');
+        let validContent;
+        try {
+            const sample = Buffer.alloc(16);
+            const { bytesRead } = await fileHandle.read(sample, 0, sample.length, 0);
+            validContent = validateMagicBytes(sample.subarray(0, bytesRead), file.mimetype);
+        } finally {
+            await fileHandle.close();
+        }
+        if (!validContent) {
+            await removeUpload();
+            return res.status(400).json({ error: 'Invalid file content' });
+        }
+
+        const mimeType = file.mimetype.split(';', 1)[0].trim().toLowerCase();
+        if (mimeType.startsWith('audio/')) {
+            return res.json({ success: true, type: 'audio', path: `/audio/${file.filename}`, name: file.originalname });
+        }
+
+        const filename = file.filename;
+        const webPath = `/videos/${filename}`;
+        const metadata = await new Promise((resolve, reject) => {
+            ffmpeg.ffprobe(file.path, (err, data) => err ? reject(err) : resolve(data));
+        });
+        const duration = Number(metadata?.format?.duration);
+        if (!Number.isFinite(duration) || duration <= 0) {
+            await removeUpload();
+            return res.status(422).json({ error: 'Unable to read video duration' });
+        }
+
+        const thumbnail = await generateThumbnail(file.path, filename);
+        let transactionStarted = false;
+        try {
+            await db.exec('BEGIN TRANSACTION');
+            transactionStarted = true;
+            const result = await db.run(
+                'INSERT INTO videos (project_id, filename, filepath, thumbnail, duration) VALUES (?, ?, ?, ?, ?)',
+                [projectId, file.originalname, webPath, thumbnail, duration]
+            );
+            const clipId = uuidv4();
+            await db.run(
+                'INSERT INTO clips (unique_id, project_id, name, filepath, thumbnail, source_video_id, duration, x, y) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [clipId, projectId, `FULL: ${file.originalname}`, webPath, thumbnail, result.lastID, duration, 100, 100]
+            );
+            await db.exec('COMMIT');
+            transactionStarted = false;
+            return res.json({ success: true, type: 'video' });
+        } catch (err) {
+            if (transactionStarted) await db.exec('ROLLBACK').catch(() => {});
+            await removeUpload();
+            if (thumbnail) {
+                const thumbnailPath = resolveInside(path.join(__dirname, 'public'), thumbnail);
+                if (thumbnailPath) await fs.remove(thumbnailPath).catch(() => {});
+            }
+            throw err;
+        }
+    } catch (err) {
+        await removeUpload();
+        console.error('Upload failed:', err);
+        return res.status(500).json({ error: 'Upload failed' });
+    }
 });
 
 app.get('/api/videos', async (req, res) => { const projectId = req.query.projectId || 1; const videos = await db.all('SELECT * FROM videos WHERE project_id = ? ORDER BY id DESC', [projectId]); res.json(videos); });
@@ -127,7 +232,8 @@ app.post('/api/delete_video', async (req, res) => {
     const { id } = req.body; 
     const vid = await db.get('SELECT * FROM videos WHERE id = ?', [id]); 
     if(vid) { 
-        try { fs.unlinkSync(path.join(__dirname, 'public', vid.filepath)); } catch(e){} 
+        const filepath = resolveInside(path.join(__dirname, 'public'), vid.filepath);
+        if (filepath) await fs.remove(filepath).catch(() => {});
         await db.run('DELETE FROM videos WHERE id = ?', [id]); 
         await db.run('DELETE FROM clips WHERE source_video_id = ?', [id]); 
     } 
@@ -138,7 +244,11 @@ app.post('/api/clip', async (req, res) => {
     const { projectId, sourceId, start, end, name, filter, speed, volume } = req.body;
     try {
         const video = await db.get('SELECT * FROM videos WHERE id = ?', [sourceId]);
-        const sourcePath = path.join(__dirname, 'public', video.filepath);
+        if (!video) return res.status(404).json({ error: 'Source video not found' });
+        const sourcePath = resolveInside(path.join(__dirname, 'public'), video.filepath);
+        if (!sourcePath || !await fs.pathExists(sourcePath)) {
+            return res.status(404).json({ error: 'Source video file not found' });
+        }
         const clipId = uuidv4();
         const outputFilename = `clip_${clipId}.mp4`;
         const outputPath = path.join(__dirname, 'public/clips', outputFilename);
@@ -188,7 +298,11 @@ app.post('/api/create_event_clip', async (req, res) => {
     const { projectId, sourceId, start, end, name, choices } = req.body;
     try {
         const video = await db.get('SELECT * FROM videos WHERE id = ?', [sourceId]);
-        const sourcePath = path.join(__dirname, 'public', video.filepath);
+        if (!video) return res.status(404).json({ error: 'Source video not found' });
+        const sourcePath = resolveInside(path.join(__dirname, 'public'), video.filepath);
+        if (!sourcePath || !await fs.pathExists(sourcePath)) {
+            return res.status(404).json({ error: 'Source video file not found' });
+        }
         const clipId = uuidv4();
         const outputFilename = `event_${clipId}.mp4`;
         const outputPath = path.join(__dirname, 'public/clips', outputFilename);
@@ -231,9 +345,37 @@ app.post('/api/clip/positions', async (req, res) => {
     } catch(err) { res.status(500).json({error: err.message}); }
 });
 
-app.post('/api/delete_clip', async (req, res) => { const { unique_id } = req.body; const clip = await db.get('SELECT * FROM clips WHERE unique_id = ?', [unique_id]); if(clip && !clip.name.startsWith('FULL:')) { try { fs.unlinkSync(path.join(__dirname, 'public', clip.filepath)); } catch(e){} await db.run('DELETE FROM clips WHERE unique_id = ?', [unique_id]); await db.run('DELETE FROM edges WHERE from_id = ? OR to_id = ?', [unique_id, unique_id]); await db.run('DELETE FROM analytics WHERE target_clip_id = ?', [unique_id]); } res.json({ success: true }); });
+app.post('/api/delete_clip', async (req, res) => {
+    const { unique_id } = req.body;
+    const clip = await db.get('SELECT * FROM clips WHERE unique_id = ?', [unique_id]);
+    if (clip && !clip.name.startsWith('FULL:')) {
+        const filepath = resolveInside(path.join(__dirname, 'public'), clip.filepath);
+        if (filepath) await fs.remove(filepath).catch(() => {});
+        await db.run('DELETE FROM clips WHERE unique_id = ?', [unique_id]);
+        await db.run('DELETE FROM edges WHERE from_id = ? OR to_id = ?', [unique_id, unique_id]);
+        await db.run('DELETE FROM analytics WHERE target_clip_id = ?', [unique_id]);
+    }
+    res.json({ success: true });
+});
 app.post('/api/clip/update', async (req, res) => { await db.run('UPDATE clips SET name = ? WHERE unique_id = ?', [req.body.name, req.body.id]); res.json({ success: true }); });
-app.post('/api/clip/thumbnail', async (req, res) => { const { id, time } = req.body; try { const clip = await db.get('SELECT * FROM clips WHERE unique_id = ?', [id]); if(!clip) return res.status(404).json({error: "Clip not found"}); const fullPath = path.join(__dirname, 'public', clip.filepath); const filename = path.basename(clip.filepath); const newThumb = await generateThumbnail(fullPath, filename, time); await db.run('UPDATE clips SET thumbnail = ? WHERE unique_id = ?', [newThumb, id]); res.json({ success: true, thumbnail: newThumb }); } catch(err) { res.status(500).json({ error: err.message }); } });
+app.post('/api/clip/thumbnail', async (req, res) => {
+    const { id, time } = req.body;
+    try {
+        const clip = await db.get('SELECT * FROM clips WHERE unique_id = ?', [id]);
+        if (!clip) return res.status(404).json({ error: 'Clip not found' });
+        const fullPath = resolveInside(path.join(__dirname, 'public'), clip.filepath);
+        if (!fullPath || !await fs.pathExists(fullPath)) {
+            return res.status(404).json({ error: 'Clip file not found' });
+        }
+        const filename = path.basename(fullPath);
+        const newThumb = await generateThumbnail(fullPath, filename, time);
+        await db.run('UPDATE clips SET thumbnail = ? WHERE unique_id = ?', [newThumb, id]);
+        res.json({ success: true, thumbnail: newThumb });
+    } catch (err) {
+        console.error('Thumbnail update failed:', err);
+        res.status(500).json({ error: 'Failed to update thumbnail' });
+    }
+});
 
 app.get('/api/story', async (req, res) => { 
     const projectId = req.query.projectId || 1; 
@@ -262,10 +404,19 @@ app.post('/api/delete_logic_block', async (req, res) => { const { logicId, fromI
 
 // --- PUBLISH ENGINE ---
 app.post('/api/publish', async (req, res) => {
-    const { projectId, title, sequence } = req.body;
+    const rawProjectId = req.body?.projectId;
+    const projectId = typeof rawProjectId === 'number'
+        ? rawProjectId
+        : (typeof rawProjectId === 'string' && /^\d+$/.test(rawProjectId) ? Number(rawProjectId) : NaN);
+    const { title, sequence } = req.body || {};
+    if (!Number.isSafeInteger(projectId) || projectId <= 0 || typeof title !== 'string' || !title.trim() || title.length > 200 || !Array.isArray(sequence) || sequence.length > 500) {
+        return res.status(400).json({ error: 'Invalid publish request' });
+    }
+    const safeTitle = escapeHtml(title);
     try {
         const project = await db.get('SELECT * FROM projects WHERE id = ?', [projectId]);
-        const themeColor = project.theme_color || '#3b82f6';
+        if (!project) return res.status(404).json({ error: 'Project not found' });
+        const themeColor = /^#[\da-f]{6}$/i.test(project.theme_color || '') ? project.theme_color : '#3b82f6';
         const exportName = title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
         const exportPath = path.join(__dirname, 'public/exports', exportName);
         await fs.emptyDir(exportPath); await fs.ensureDir(path.join(exportPath, 'clips')); await fs.ensureDir(path.join(exportPath, 'audio'));
@@ -274,10 +425,34 @@ app.post('/api/publish', async (req, res) => {
         const edges = await db.all('SELECT * FROM edges WHERE project_id = ? ORDER BY trigger_time ASC', [projectId]);
 
         for (const clip of clips) {
-            const src = path.join(__dirname, 'public', clip.filepath); const filename = path.basename(clip.filepath); const dest = path.join(exportPath, 'clips', filename);
-            if(await fs.pathExists(src)) { await fs.copy(src, dest); clip.filepath = `clips/${filename}`; }
-            if(clip.thumbnail) { const thumbName = path.basename(clip.thumbnail); if(await fs.pathExists(path.join(__dirname, 'public', clip.thumbnail))) { await fs.copy(path.join(__dirname, 'public', clip.thumbnail), path.join(exportPath, 'clips', thumbName)); clip.thumbnail = `clips/${thumbName}`; } }
-            if(clip.bg_music) { const audSrc = path.join(__dirname, 'public', clip.bg_music); const audName = path.basename(clip.bg_music); if(await fs.pathExists(audSrc)) { await fs.copy(audSrc, path.join(exportPath, 'audio', audName)); clip.bg_music = `audio/${audName}`; } }
+            const src = resolveInside(path.join(__dirname, 'public'), clip.filepath);
+            if (src && await fs.pathExists(src)) {
+                const filename = path.basename(src);
+                await fs.copy(src, path.join(exportPath, 'clips', filename));
+                clip.filepath = `clips/${filename}`;
+            } else {
+                clip.filepath = '';
+            }
+            if (clip.thumbnail) {
+                const thumbSrc = resolveInside(path.join(__dirname, 'public'), clip.thumbnail);
+                if (thumbSrc && await fs.pathExists(thumbSrc)) {
+                    const thumbName = path.basename(thumbSrc);
+                    await fs.copy(thumbSrc, path.join(exportPath, 'clips', thumbName));
+                    clip.thumbnail = `clips/${thumbName}`;
+                } else {
+                    clip.thumbnail = '';
+                }
+            }
+            if (clip.bg_music) {
+                const audSrc = resolveInside(path.join(__dirname, 'public'), clip.bg_music);
+                if (audSrc && await fs.pathExists(audSrc)) {
+                    const audName = path.basename(audSrc);
+                    await fs.copy(audSrc, path.join(exportPath, 'audio', audName));
+                    clip.bg_music = `audio/${audName}`;
+                } else {
+                    clip.bg_music = null;
+                }
+            }
         }
 
         const logicBlocks = {};
@@ -293,15 +468,17 @@ app.post('/api/publish', async (req, res) => {
             });
         });
 
-        const escapeJSON = (obj) => JSON.stringify(obj).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
+        const clipsJson = safeJsonForHtml(clips);
+        const blocksJson = safeJsonForHtml(Object.values(logicBlocks));
+        const playlistJson = safeJsonForHtml(sequence || []);
 
         const manifest = { name: title, short_name: title, start_url: "./index.html", display: "fullscreen", background_color: "#000", theme_color: themeColor, icons: [] };
         await fs.writeFile(path.join(exportPath, 'manifest.json'), JSON.stringify(manifest));
 
-        const htmlContent = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${title}</title><link rel="manifest" href="manifest.json"><script src="https://unpkg.com/vue@3/dist/vue.global.js"></script><script src="https://cdn.tailwindcss.com"></script><style>body{background:radial-gradient(circle at top right,#1e1b4b,#020617);color:#fff;font-family:'Inter',sans-serif;overflow:hidden}.overlay{background:rgba(0,0,0,0.7);backdrop-filter:blur(10px)}.glass-panel{background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);backdrop-filter:blur(12px);border-radius:1rem}.choice-card{transition:all 0.3s;cursor:pointer;border:1px solid rgba(255,255,255,0.1);position:relative;overflow:hidden}.choice-card:hover{transform:scale(1.05);border-color:${themeColor};box-shadow:0 0 25px ${themeColor}66}.choice-card.locked{opacity:0.5;filter:grayscale(1);cursor:not-allowed}.fade-enter-active,.fade-leave-active{transition:opacity 0.5s ease}.fade-enter-from,.fade-leave-to{opacity:0}.video-wrapper{position:absolute;inset:0;background:black;transition:opacity 0.3s ease-in-out;display:flex;align-items:center;justify-content:center}.faded-out{opacity:0}[v-cloak]{display:none}</style></head><body class="h-screen w-screen flex items-center justify-center"><div id="app" class="w-full h-full relative" v-cloak><div v-if="!started" class="absolute inset-0 z-50 bg-black flex flex-col items-center justify-center gap-6"><h1 class="text-4xl font-bold mb-4 drop-shadow-lg">${title}</h1><button @click="startMovie(false)" class="px-8 py-4 bg-white text-black font-bold rounded-full hover:scale-105 transition text-xl shadow-xl w-64">▶ Start Movie</button><button v-if="hasSave" @click="startMovie(true)" class="px-8 py-4 bg-gray-800 text-white border border-gray-600 font-bold rounded-full hover:scale-105 transition text-xl shadow-xl w-64">💾 Resume</button></div><div class="video-wrapper" :class="{'faded-out': isFading}"><video ref="player" class="max-w-full max-h-full object-contain" @timeupdate="checkTime" @ended="onClipEnded" playsinline webkit-playsinline></video></div><audio ref="bgm" loop></audio><div v-if="showChoices" class="absolute inset-0 overlay flex flex-col justify-center items-center z-50 animate-fade-in"><h1 class="text-4xl font-bold mb-10 text-white drop-shadow-[0_0_10px_rgba(255,255,255,0.5)]">Make Your Choice</h1><div class="flex flex-wrap gap-8 justify-center px-10"><div v-for="ch in currentChoices" @click="makeChoice(ch)" class="glass-panel choice-card w-64 h-36 md:w-80 md:h-48 group" :class="{locked: isLocked(ch)}"><img :src="getThumb(ch.to)" class="absolute inset-0 w-full h-full object-cover opacity-90 group-hover:opacity-100 transition duration-300"><div class="absolute bottom-0 left-0 w-full p-3 text-center font-bold text-lg tracking-wide bg-black/60 backdrop-blur-sm" :style="{color: ch.color || '#fff'}">{{ch.label}}</div><div v-if="isLocked(ch)" class="absolute inset-0 flex items-center justify-center bg-black/60"><span class="text-4xl">🔒</span></div></div></div></div></div><script>
-        const CLIPS=JSON.parse('${escapeJSON(clips)}'); 
-        const BLOCKS=JSON.parse('${escapeJSON(Object.values(logicBlocks))}'); 
-        const PLAYLIST=JSON.parse('${escapeJSON(sequence || [])}'); 
+        const htmlContent = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${safeTitle}</title><link rel="manifest" href="manifest.json"><script src="https://unpkg.com/vue@3/dist/vue.global.js"></script><script src="https://cdn.tailwindcss.com"></script><style>body{background:radial-gradient(circle at top right,#1e1b4b,#020617);color:#fff;font-family:'Inter',sans-serif;overflow:hidden}.overlay{background:rgba(0,0,0,0.7);backdrop-filter:blur(10px)}.glass-panel{background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);backdrop-filter:blur(12px);border-radius:1rem}.choice-card{transition:all 0.3s;cursor:pointer;border:1px solid rgba(255,255,255,0.1);position:relative;overflow:hidden}.choice-card:hover{transform:scale(1.05);border-color:${themeColor};box-shadow:0 0 25px ${themeColor}66}.choice-card.locked{opacity:0.5;filter:grayscale(1);cursor:not-allowed}.fade-enter-active,.fade-leave-active{transition:opacity 0.5s ease}.fade-enter-from,.fade-leave-to{opacity:0}.video-wrapper{position:absolute;inset:0;background:black;transition:opacity 0.3s ease-in-out;display:flex;align-items:center;justify-content:center}.faded-out{opacity:0}[v-cloak]{display:none}</style></head><body class="h-screen w-screen flex items-center justify-center"><div id="app" class="w-full h-full relative" v-cloak><div v-if="!started" class="absolute inset-0 z-50 bg-black flex flex-col items-center justify-center gap-6"><h1 class="text-4xl font-bold mb-4 drop-shadow-lg">${safeTitle}</h1><button @click="startMovie(false)" class="px-8 py-4 bg-white text-black font-bold rounded-full hover:scale-105 transition text-xl shadow-xl w-64">▶ Start Movie</button><button v-if="hasSave" @click="startMovie(true)" class="px-8 py-4 bg-gray-800 text-white border border-gray-600 font-bold rounded-full hover:scale-105 transition text-xl shadow-xl w-64">💾 Resume</button></div><div class="video-wrapper" :class="{'faded-out': isFading}"><video ref="player" class="max-w-full max-h-full object-contain" @timeupdate="checkTime" @ended="onClipEnded" playsinline webkit-playsinline></video></div><audio ref="bgm" loop></audio><div v-if="showChoices" class="absolute inset-0 overlay flex flex-col justify-center items-center z-50 animate-fade-in"><h1 class="text-4xl font-bold mb-10 text-white drop-shadow-[0_0_10px_rgba(255,255,255,0.5)]">Make Your Choice</h1><div class="flex flex-wrap gap-8 justify-center px-10"><div v-for="ch in currentChoices" @click="makeChoice(ch)" class="glass-panel choice-card w-64 h-36 md:w-80 md:h-48 group" :class="{locked: isLocked(ch)}"><img :src="getThumb(ch.to)" class="absolute inset-0 w-full h-full object-cover opacity-90 group-hover:opacity-100 transition duration-300"><div class="absolute bottom-0 left-0 w-full p-3 text-center font-bold text-lg tracking-wide bg-black/60 backdrop-blur-sm" :style="{color: ch.color || '#fff'}">{{ch.label}}</div><div v-if="isLocked(ch)" class="absolute inset-0 flex items-center justify-center bg-black/60"><span class="text-4xl">🔒</span></div></div></div></div></div><script>
+        const CLIPS=${clipsJson};
+        const BLOCKS=${blocksJson};
+        const PLAYLIST=${playlistJson};
         const PROJECT_ID=${projectId};
         const {createApp}=Vue; createApp({
             data(){return{started:false, currentClip:null, activeBlocks:[], currentOptions:null, showChoices:false, historyStack:[], gameState:{}, isPlayingSubClip:false, hasSave:false, isFading:false, playlistIndex: 0}},
@@ -409,4 +586,21 @@ app.post('/api/publish', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.listen(PORT, () => console.log(`🎬 Studio Infinity v20.7 Running: http://localhost:${PORT}`));
+app.use((err, req, res, next) => {
+    console.error('Server error:', err);
+    if (err instanceof multer.MulterError) {
+        const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+        return res.status(status).json({ error: status === 413 ? 'Upload exceeds the file-size limit' : 'Upload rejected' });
+    }
+    if (err.message === 'Unsupported upload type') {
+        return res.status(400).json({ error: 'Unsupported upload type' });
+    }
+    res.status(500).json({ error: 'Internal server error' });
+});
+
+dbReady.then(() => {
+    app.listen(PORT, HOST, () => console.log(`Studio Infinity v20.7 Running: http://${HOST}:${PORT}`));
+}).catch((err) => {
+    console.error('Database initialization failed; server was not started.', err);
+    process.exit(1);
+});
