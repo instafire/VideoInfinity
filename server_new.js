@@ -370,6 +370,7 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
     throw new Error('PORT must be an integer between 1 and 65535');
 }
 const app = express();
+app.disable('x-powered-by');
 
 // FIX 4: Restrict CORS to specific origins (configure as needed)
 const corsOptions = {

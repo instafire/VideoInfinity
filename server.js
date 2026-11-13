@@ -18,6 +18,7 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
     throw new Error('PORT must be an integer between 1 and 65535');
 }
 const app = express();
+app.disable('x-powered-by');
 
 app.use(express.json({ limit: '10mb' }));
 app.use((req, res, next) => {
@@ -115,7 +116,7 @@ app.post('/api/analytics/track', async (req, res) => { await db.run('INSERT INTO
 app.get('/api/analytics/:projectId', async (req, res) => { const rows = await db.all('SELECT choice_label, COUNT(*) as count FROM analytics WHERE project_id = ? GROUP BY choice_label ORDER BY count DESC', [req.params.projectId]); res.json(rows); });
 app.post('/api/analytics/reset', async (req, res) => { 
     try { await db.run('DELETE FROM analytics WHERE project_id = ?', [req.body.projectId]); res.json({ success: true }); } 
-    catch (err) { res.status(500).json({ error: err.message }); }
+    catch (err) { res.status(500).json({ error: 'Failed to reset analytics' }); }
 });
 
 app.get('/api/exports', async (req, res) => {
@@ -267,7 +268,7 @@ app.post('/api/clip', async (req, res) => {
             await db.run('INSERT INTO clips (unique_id, project_id, name, filepath, thumbnail, source_video_id, duration, start_time, end_time, x, y) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [clipId, projectId, name, webPath, thumbnail, sourceId, duration, start, end, 150, 150]);
             res.json({ success: true });
         }).on('error', (err) => res.status(500).json({ error: "Render Failed" })).run();
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { res.status(500).json({ error: 'Failed to create clip' }); }
 });
 
 app.post('/api/update_event_logic', async (req, res) => {
@@ -291,7 +292,7 @@ app.post('/api/update_event_logic', async (req, res) => {
             }
         }
         res.json({ success: true });
-    } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+    } catch (err) { console.error(err); res.status(500).json({ error: 'Failed to update event logic' }); }
 });
 
 app.post('/api/create_event_clip', async (req, res) => {
@@ -332,7 +333,7 @@ app.post('/api/create_event_clip', async (req, res) => {
             }
             res.json({ success: true, clipId });
         }).on('error', (err) => { console.error(err); res.status(500).json({ error: "Render Failed" }); }).run();
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { res.status(500).json({ error: 'Failed to create event clip' }); }
 });
 
 app.post('/api/clip/positions', async (req, res) => {
@@ -342,7 +343,7 @@ app.post('/api/clip/positions', async (req, res) => {
             await db.run('UPDATE clips SET x = ?, y = ? WHERE unique_id = ?', [u.x, u.y, u.id]);
         }
         res.json({ success: true });
-    } catch(err) { res.status(500).json({error: err.message}); }
+    } catch(err) { res.status(500).json({error: 'Failed to update clip positions'}); }
 });
 
 app.post('/api/delete_clip', async (req, res) => {
@@ -397,10 +398,10 @@ app.post('/api/save_logic_block', async (req, res) => {
             } 
         }
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { res.status(500).json({ error: 'Failed to save logic block' }); }
 });
 
-app.post('/api/delete_logic_block', async (req, res) => { const { logicId, fromId, triggerTime } = req.body; try { if (logicId && !logicId.startsWith('legacy_')) await db.run('DELETE FROM edges WHERE logic_id = ?', [logicId]); else await db.run('DELETE FROM edges WHERE from_id = ? AND trigger_time BETWEEN ? AND ?', [fromId, triggerTime - 0.01, triggerTime + 0.01]); res.json({ success: true }); } catch(err) { res.status(500).json({error: err.message}); } });
+app.post('/api/delete_logic_block', async (req, res) => { const { logicId, fromId, triggerTime } = req.body; try { if (logicId && !logicId.startsWith('legacy_')) await db.run('DELETE FROM edges WHERE logic_id = ?', [logicId]); else await db.run('DELETE FROM edges WHERE from_id = ? AND trigger_time BETWEEN ? AND ?', [fromId, triggerTime - 0.01, triggerTime + 0.01]); res.json({ success: true }); } catch(err) { res.status(500).json({error: 'Failed to delete logic block'}); } });
 
 // --- PUBLISH ENGINE ---
 app.post('/api/publish', async (req, res) => {
@@ -583,7 +584,7 @@ app.post('/api/publish', async (req, res) => {
         }).mount('#app');<\/script></body></html>`;
         await fs.writeFile(path.join(exportPath, 'index.html'), htmlContent);
         res.json({ success: true, url: `/exports/${exportName}/index.html` });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { res.status(500).json({ error: 'Failed to generate export' }); }
 });
 
 app.use((err, req, res, next) => {
