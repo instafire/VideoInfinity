@@ -1,96 +1,37 @@
-const { chromium } = require('@playwright/test');
+const { expect, test } = require('@playwright/test');
 
-(async () => {
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
+const views = [
+    ['/media', '.media-library', 'Media Library'],
+    ['/scenes', '.scene-editor', 'Scenes'],
+    ['/timeline', '.timeline-view', 'Timeline'],
+    ['/branches', '.branch-editor', 'Branches'],
+    ['/events', '.event-editor', 'Events'],
+    ['/preview', '.preview-view', 'Preview'],
+    ['/analytics', '.analytics-view', 'Analytics'],
+    ['/publish', '.publish-view', 'Publish']
+];
 
-  // Track errors
-  const errors = [];
-  page.on('console', msg => {
-    if (msg.type() === 'error') errors.push(msg.text());
-  });
+test('modular studio loads its project and every sidebar view', async ({ page, request, baseURL }) => {
+    const pageErrors = [];
+    page.on('pageerror', (error) => pageErrors.push(error.message));
 
-  console.log('Testing VideoStudio UI...\n');
+    const apiResponse = await request.get('/api/projects');
+    expect(apiResponse.status()).toBe(200);
+    const projects = await apiResponse.json();
+    expect(projects.some((project) => project.title === 'Default Project')).toBe(true);
 
-  // Test 1: Dashboard loads
-  await page.goto('http://localhost:3000');
-  await page.waitForSelector('.app-layout', { timeout: 10000 });
-  console.log('✓ App layout loaded');
+    const response = await page.goto(baseURL, { waitUntil: 'networkidle' });
+    expect(response.status()).toBe(200);
+    expect(response.headers()['x-content-type-options']).toBe('nosniff');
+    await expect(page.locator('.app-layout')).toBeVisible();
+    await expect(page.locator('.sidebar')).toBeVisible();
+    await expect(page.locator('.project-info .project-name')).toContainText('Default Project');
+    await expect(page.locator('.nav-item')).toHaveCount(9);
 
-  // Test 2: Sidebar navigation
-  const sidebar = await page.locator('.sidebar');
-  if (await sidebar.isVisible()) console.log('✓ Sidebar visible');
+    for (const [route, selector, label] of views) {
+        await page.locator(`a[href="#${route}"]`).click();
+        await expect(page.locator(selector), `${label} view should render`).toBeVisible();
+    }
 
-  // Test 3: Navigation items
-  const navItems = await page.locator('.nav-item');
-  const navCount = await navItems.count();
-  console.log(`✓ Found ${navCount} navigation items`);
-
-  // Test 4: Dashboard content
-  const dashboard = await page.locator('.dashboard');
-  if (await dashboard.isVisible()) console.log('✓ Dashboard visible');
-
-  // Test 5: Navigate to Media Library
-  await page.click('a[href="#/media"]');
-  await page.waitForTimeout(500);
-  const mediaLib = await page.locator('.media-library');
-  if (await mediaLib.isVisible()) console.log('✓ Media Library view works');
-
-  // Test 6: Navigate to Scenes
-  await page.click('a[href="#/scenes"]');
-  await page.waitForTimeout(500);
-  const scenes = await page.locator('.scene-editor');
-  if (await scenes.isVisible()) console.log('✓ Scenes view works');
-
-  // Test 7: Navigate to Timeline
-  await page.click('a[href="#/timeline"]');
-  await page.waitForTimeout(500);
-  const timeline = await page.locator('.timeline-view');
-  if (await timeline.isVisible()) console.log('✓ Timeline view works');
-
-  // Test 8: Navigate to Branches
-  await page.click('a[href="#/branches"]');
-  await page.waitForTimeout(500);
-  const branches = await page.locator('.branch-editor');
-  if (await branches.isVisible()) console.log('✓ Branches view works');
-
-  // Test 9: Navigate to Events
-  await page.click('a[href="#/events"]');
-  await page.waitForTimeout(500);
-  const events = await page.locator('.event-editor');
-  if (await events.isVisible()) console.log('✓ Events view works');
-
-  // Test 10: Navigate to Preview
-  await page.click('a[href="#/preview"]');
-  await page.waitForTimeout(500);
-  const preview = await page.locator('.preview-view');
-  if (await preview.isVisible()) console.log('✓ Preview view works');
-
-  // Test 11: Navigate to Analytics
-  await page.click('a[href="#/analytics"]');
-  await page.waitForTimeout(500);
-  const analytics = await page.locator('.analytics-view');
-  if (await analytics.isVisible()) console.log('✓ Analytics view works');
-
-  // Test 12: Navigate to Publish
-  await page.click('a[href="#/publish"]');
-  await page.waitForTimeout(500);
-  const publish = await page.locator('.publish-view');
-  if (await publish.isVisible()) console.log('✓ Publish view works');
-
-  // Test 13: Back to Dashboard
-  await page.click('a[href="#/"]');
-  await page.waitForTimeout(500);
-  if (await dashboard.isVisible()) console.log('✓ Dashboard navigation works');
-
-  // Report errors
-  if (errors.length > 0) {
-    console.log('\n⚠ Console errors found:');
-    errors.forEach(e => console.log('  - ' + e.substring(0, 100)));
-  } else {
-    console.log('\n✓ No console errors');
-  }
-
-  console.log('\n✅ All tests passed!');
-  await browser.close();
-})();
+    expect(pageErrors).toEqual([]);
+});

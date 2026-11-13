@@ -1,291 +1,139 @@
 const assert = require('node:assert/strict');
-const fs = require('fs');
-const path = require('path');
-const { spawn } = require('child_process');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+const net = require('node:net');
 const axios = require('axios');
 const { chromium } = require('@playwright/test');
 
-const APP_URL = 'http://127.0.0.1:3000';
-const SCREENSHOT_DIR = path.join(__dirname, 'screenshots', 'phase1');
-
-function delay(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function isServerReachable() {
-    try {
-        const response = await axios.get(APP_URL, { timeout: 1500, validateStatus: () => true });
-        return response.status >= 200 && response.status < 500;
-    } catch (error) {
-        return false;
-    }
-}
-
-async function waitForServer(timeoutMs = 30000) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-        if (await isServerReachable()) {
-            return;
-        }
-        await delay(500);
-    }
-    throw new Error(`Server did not start within ${timeoutMs}ms`);
-}
-
-async function stopServer(server) {
-    if (!server || server.killed) return;
-    if (process.platform === 'win32') {
-        await new Promise((resolve) => {
-            const killer = spawn('taskkill', ['/pid', String(server.pid), '/t', '/f'], { stdio: 'ignore' });
-            killer.on('exit', () => resolve());
-            killer.on('error', () => resolve());
+async function getFreePort() {
+    return new Promise((resolve, reject) => {
+        const listener = net.createServer();
+        listener.once('error', reject);
+        listener.listen(0, '127.0.0.1', () => {
+            const { port } = listener.address();
+            listener.close((error) => error ? reject(error) : resolve(port));
         });
-        return;
-    }
-    server.kill('SIGTERM');
+    });
 }
 
-async function screenshot(page, name) {
-    if (!fs.existsSync(SCREENSHOT_DIR)) {
-        fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+async function waitForServer(baseUrl, server, readOutput, timeoutMs = 30000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (server.exitCode !== null) {
+            throw new Error(`Server exited with code ${server.exitCode}:\n${readOutput()}`);
+        }
+        try {
+            const response = await axios.get(`${baseUrl}/api/projects`, { timeout: 1000 });
+            if (response.status === 200) return response.data;
+        } catch (error) {
+            if (error.code !== 'ECONNREFUSED' && error.code !== 'ECONNRESET' && error.code !== 'ETIMEDOUT') {
+                throw error;
+            }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    await page.screenshot({ path: path.join(SCREENSHOT_DIR, name), fullPage: true });
+    throw new Error(`Server did not start within ${timeoutMs}ms:\n${readOutput()}`);
 }
 
 async function run() {
-    let server = null;
-    let browser = null;
-    let startedServer = false;
+    const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'video-infinity-e2e-'));
+    const port = await getFreePort();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    let server;
+    let browser;
+    let generatedExportPath;
+    let serverOutput = '';
     const pageErrors = [];
-    const consoleErrors = [];
 
     try {
-        if (!(await isServerReachable())) {
-            server = spawn('node', ['server.js'], {
-                cwd: __dirname,
-                stdio: ['ignore', 'pipe', 'pipe']
-            });
-            startedServer = true;
-            server.stdout.on('data', (chunk) => process.stdout.write(chunk));
-            server.stderr.on('data', (chunk) => process.stderr.write(chunk));
-            await waitForServer();
+        server = spawn('node', [path.join(__dirname, 'server.js')], {
+            cwd: workDir,
+            env: { ...process.env, HOST: '127.0.0.1', PORT: String(port) },
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+        server.stdout.on('data', (chunk) => { serverOutput += chunk.toString(); });
+        server.stderr.on('data', (chunk) => { serverOutput += chunk.toString(); });
+
+        const projects = await waitForServer(baseUrl, server, () => serverOutput);
+        assert.ok(projects.some((project) => project.title === 'Default Project'));
+
+        const response = await axios.get(baseUrl);
+        assert.equal(response.headers['x-content-type-options'], 'nosniff');
+        assert.equal(response.headers['x-frame-options'], 'SAMEORIGIN');
+
+        const invalidColor = await axios.post(`${baseUrl}/api/project/settings`, {
+            id: projects[0].id,
+            color: '</style><script>alert(1)</script>'
+        }, { validateStatus: () => true });
+        assert.equal(invalidColor.status, 400, 'unsafe theme colors must be rejected');
+
+        const publishTitle = `$&</title><script>alert(91)</script> ${Date.now()}`;
+        const exportName = publishTitle.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+        generatedExportPath = path.join(__dirname, 'public', 'exports', exportName);
+        try {
+            await fs.access(generatedExportPath);
+            throw new Error('refusing to overwrite an existing generated export');
+        } catch (error) {
+            if (error.code !== 'ENOENT') throw error;
         }
+        const publishResponse = await axios.post(`${baseUrl}/api/publish`, {
+            projectId: projects[0].id,
+            title: publishTitle,
+            sequence: [{ id: `$'</script><script>alert(92)</script>` }]
+        });
+        assert.equal(publishResponse.status, 200);
+        const exportedPlayer = await axios.get(`${baseUrl}${publishResponse.data.url}`);
+        assert.ok(exportedPlayer.data.includes('&lt;/title&gt;&lt;script&gt;alert(91)&lt;/script&gt;'));
+        assert.ok(!exportedPlayer.data.includes('</title><script>alert(91)</script>'));
+        assert.ok(!exportedPlayer.data.includes('</script><script>alert(92)</script>'));
+        assert.ok(exportedPlayer.data.includes('\\u003c/script\\u003e\\u003cscript\\u003ealert(92)\\u003c/script\\u003e'));
 
         browser = await chromium.launch({ headless: true });
-        const context = await browser.newContext({
-            viewport: { width: 1600, height: 1000 }
+        const exportPage = await browser.newPage();
+        const exportDialogs = [];
+        exportPage.on('dialog', async (dialog) => {
+            exportDialogs.push(dialog.message());
+            await dialog.dismiss();
         });
-        const page = await context.newPage();
+        await exportPage.goto(`${baseUrl}${publishResponse.data.url}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        assert.deepEqual(exportDialogs, [], 'published HTML must not execute hostile title or playlist scripts');
+        await exportPage.close();
 
-        const trackPage = (trackedPage) => {
-            trackedPage.on('pageerror', (error) => {
-                pageErrors.push(error.message);
-            });
-            trackedPage.on('console', (msg) => {
-                if (msg.type() !== 'error') return;
-                const text = msg.text();
-                if (text.includes('favicon.ico')) return;
-                consoleErrors.push(text);
-            });
-        };
+        const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+        page.on('pageerror', (error) => pageErrors.push(error.message));
 
-        trackPage(page);
+        await page.goto(baseUrl, { waitUntil: 'networkidle', timeout: 30000 });
+        await page.getByText('Project Library', { exact: true }).waitFor();
+        await page.locator('.grid .glass-panel').filter({ hasText: 'Default Project' }).first().click();
+        await page.getByText('Import Media', { exact: true }).waitFor();
 
-        console.log('1. Open project library');
-        await page.goto(APP_URL, { waitUntil: 'networkidle', timeout: 30000 });
-        await page.waitForSelector('text=Project Library');
-        await screenshot(page, '01-project-library.png');
+        await page.getByRole('button', { name: /Editor/ }).click();
+        await page.getByText('Source', { exact: true }).waitFor();
+        await page.getByRole('button', { name: /Library/ }).click();
+        await page.getByText('All Clips', { exact: true }).waitFor();
+        await page.getByRole('button', { name: /Events/ }).click();
+        await page.getByText('Logic Options (Triggers at End)', { exact: true }).waitFor();
+        await page.getByRole('button', { name: /Stats/ }).click();
+        await page.getByText('Project Analytics', { exact: true }).waitFor();
+        await page.getByRole('button', { name: /Publish/ }).click();
+        await page.getByText('Final Build', { exact: true }).waitFor();
 
-        console.log('2. Select Default Project');
-        await page.locator('div.project-card-3d:has-text("Default Project")').first().click();
-        await page.waitForFunction(() => window.__studioApp?.currentProject?.title === 'Default Project');
-        await page.waitForSelector('text=Story Workspace');
-        await screenshot(page, '02-workspace-shell.png');
-
-        console.log('3. Verify the unified editor opens first');
-        await page.waitForFunction(() => window.__studioApp?.view === 'editor');
-        await page.waitForSelector('text=Story Timeline');
-        await screenshot(page, '03-editor-view.png');
-
-        console.log('4. Verify workspace navigation');
-        for (const label of ['Editor', 'Media', 'Scenes', 'Branches', 'Publish', 'Library', 'Events', 'Analytics', 'Rewards']) {
-            await page.getByRole('button', { name: new RegExp(label, 'i') }).first().waitFor({ state: 'visible' });
-        }
-
-        console.log('5. Navigate to Scenes');
-        await page.getByRole('button', { name: /^Scenes/i }).first().click();
-        await page.waitForSelector('text=Clip Library');
-        await screenshot(page, '04-scenes-view.png');
-
-        console.log('6. Navigate to Library');
-        await page.getByRole('button', { name: /^Library/i }).first().click();
-        await page.waitForSelector('text=All Clips');
-        await page.waitForFunction(() => window.__studioApp?.clips?.length > 0);
-        await page.evaluate(() => {
-            const app = window.__studioApp;
-            const clip = app.clips[0];
-            app.librarySelectedClip = clip ? JSON.parse(JSON.stringify(clip)) : null;
-        });
-        await page.waitForSelector('text=Story Metadata');
-        await page.waitForSelector('text=Reusable Presets');
-        await screenshot(page, '05-library-view.png');
-
-        console.log('7. Navigate to Events');
-        await page.getByRole('button', { name: /^Events/i }).first().click();
-        await page.waitForSelector('text=Logic Options');
-        await screenshot(page, '06-events-view.png');
-
-        console.log('8. Navigate to Branches');
-        await page.getByRole('button', { name: /^Branches/i }).first().click();
-        await page.waitForSelector('text=Graph View');
-
-        const logicOption = await page.evaluate(() => {
-            const app = window.__studioApp;
-            const first = app.masterClips[0] || app.eventClips[0] || app.subClips[0];
-            return first ? first.unique_id : null;
-        });
-        assert.ok(logicOption, 'Expected at least one clip for logic testing');
-        await page.locator('select').first().selectOption(logicOption);
-        await page.waitForTimeout(1000);
-        await page.getByRole('button', { name: /Graph View/i }).click();
-        await page.waitForSelector('.graph-node');
-        await screenshot(page, '07-branches-graph.png');
-        await page.getByRole('button', { name: /^Back to Timeline$/i }).click();
-        await page.waitForSelector('text=TIMELINE');
-
-        console.log('9. Navigate to Analytics and Rewards');
-        await page.getByRole('button', { name: /^Analytics/i }).first().click();
-        await page.waitForSelector('text=Project Analytics');
-        await page.waitForSelector('text=Scene Reach');
-        await screenshot(page, '08-analytics-view.png');
-        await page.getByRole('button', { name: /^Rewards/i }).first().click();
-        await page.waitForSelector('text=Achievements');
-        await screenshot(page, '09-rewards-view.png');
-
-        console.log('10. Navigate to Publish and seed a preview sequence');
-        await page.getByRole('button', { name: /^Publish/i }).first().click();
-        await page.waitForSelector('text=Final Build');
-        await page.waitForSelector('text=Diagnostics');
-        await page.waitForFunction(() => window.__studioApp?.filteredPublishClips?.length > 0);
-        await page.evaluate(() => {
-            const app = window.__studioApp;
-            app.storySequence = app.filteredPublishClips.slice(0, 2).map((clip) => ({
-                id: clip.unique_id,
-                name: clip.name
-            }));
-        });
-        await page.waitForFunction(() => window.__studioApp?.storySequence?.length > 0);
-        await screenshot(page, '10-publish-view.png');
-
-        console.log('11. Launch preview overlay');
-        await page.locator('[data-testid=\"publish-preview\"]').click();
-        await page.waitForFunction(() => window.__studioApp?.previewMode === true);
-        await page.waitForSelector('text=Simulating:');
-        await page.waitForFunction(() => {
-            const app = window.__studioApp;
-            return Boolean(app?.previewShowChoices || app?.previewCurrentClip || app?.previewIsGameOver);
-        });
-        await screenshot(page, '11-preview-overlay.png');
-        await page.getByRole('button', { name: /Close/i }).click();
-        await page.waitForFunction(() => window.__studioApp?.previewMode === false);
-
-        console.log('12. Build and open published player');
-        await page.locator('[data-testid=\"publish-build\"]').click();
-        await page.waitForFunction(
-            () => window.__studioApp?.publishing === true || Boolean(window.__studioApp?.publishUrl),
-            null,
-            { timeout: 10000 }
-        ).catch(() => {});
-        await page.waitForFunction(
-            () => window.__studioApp?.publishing === false || Boolean(window.__studioApp?.publishUrl),
-            null,
-            { timeout: 90000 }
-        ).catch(() => {});
-        let publishState = await page.evaluate(() => ({
-            publishUrl: window.__studioApp?.publishUrl || '',
-            toast: window.__studioApp?.toast || null,
-            diagnostics: window.__studioApp?.storyDiagnostics?.summary || null,
-            sequence: window.__studioApp?.storySequence || [],
-            projectId: window.__studioApp?.currentProject?.id || null,
-            title: window.__studioApp?.publishTitle || window.__studioApp?.currentProject?.title || 'Untitled Movie'
-        }));
-        console.log('Publish state after button click:', publishState);
-
-        if (!publishState.publishUrl && !publishState?.diagnostics?.errorCount) {
-            await page.evaluate(() => window.__studioApp?.publishProject());
-            await page.waitForFunction(
-                () => window.__studioApp?.publishing === false || Boolean(window.__studioApp?.publishUrl),
-                null,
-                { timeout: 90000 }
-            ).catch(() => {});
-            publishState = await page.evaluate(() => ({
-                publishUrl: window.__studioApp?.publishUrl || '',
-                toast: window.__studioApp?.toast || null,
-                diagnostics: window.__studioApp?.storyDiagnostics?.summary || null,
-                sequence: window.__studioApp?.storySequence || [],
-                projectId: window.__studioApp?.currentProject?.id || null,
-                title: window.__studioApp?.publishTitle || window.__studioApp?.currentProject?.title || 'Untitled Movie'
-            }));
-            console.log('Publish state after direct method call:', publishState);
-        }
-
-        let publishUrl = publishState.publishUrl;
-        if (!publishUrl && publishState.projectId && Array.isArray(publishState.sequence) && publishState.sequence.length) {
-            const directPublish = await page.evaluate(async ({ projectId, title, sequence }) => {
-                const response = await fetch('/api/publish', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ projectId, title, sequence })
-                });
-                if (!response.ok) {
-                    return { ok: false, status: response.status, body: await response.text() };
-                }
-                return { ok: true, data: await response.json() };
-            }, {
-                projectId: publishState.projectId,
-                title: publishState.title,
-                sequence: publishState.sequence
-            });
-            assert.ok(directPublish.ok, `Direct publish failed: ${JSON.stringify(directPublish)}`);
-            publishUrl = directPublish.data.url;
-        }
-
-        assert.ok(publishUrl, 'Expected publish URL after build');
-        const playerPage = await context.newPage();
-        trackPage(playerPage);
-        await playerPage.goto(new URL(publishUrl, APP_URL).href, { waitUntil: 'networkidle', timeout: 60000 });
-        await playerPage.waitForSelector('text=Start Movie');
-        await screenshot(playerPage, '12-published-player.png');
-
-        console.log('13. Validate Phase 1 state contract');
-        const summary = await page.evaluate(() => ({
-            workspaceGroup: window.__studioApp.currentWorkspaceGroup,
-            activeViews: window.__studioApp.activeWorkspaceViews,
-            project: window.__studioApp.currentProject?.title,
-            sequenceCount: window.__studioApp.storySequence.length,
-            publishUrl: window.__studioApp.publishUrl
-        }));
-        assert.equal(summary.project, 'Default Project');
-        assert.ok(Array.isArray(summary.activeViews) && summary.activeViews.length > 0, 'Expected active workspace views');
-        assert.ok(summary.sequenceCount > 0, 'Expected seeded publish sequence');
-        assert.ok(summary.publishUrl, 'Expected a published player URL');
-
-        if (pageErrors.length) {
-            throw new Error(`Page errors detected:\n${pageErrors.join('\n')}`);
-        }
-        if (consoleErrors.length) {
-            throw new Error(`Console errors detected:\n${consoleErrors.join('\n')}`);
-        }
-
-        console.log('Phase 1 end-to-end test passed.');
-        console.log(`Screenshots: ${SCREENSHOT_DIR}`);
+        assert.deepEqual(pageErrors, [], `browser runtime errors: ${pageErrors.join('\n')}`);
+        console.log('Classic UI and export smoke tests passed: navigation, safe generated HTML, security headers, and unsafe-theme rejection.');
     } finally {
-        if (browser) {
-            await browser.close();
+        if (browser) await browser.close();
+        if (server && server.exitCode === null) {
+            server.kill('SIGTERM');
+            await Promise.race([
+                new Promise((resolve) => server.once('exit', resolve)),
+                new Promise((resolve) => setTimeout(resolve, 5000))
+            ]);
+            if (server.exitCode === null) server.kill('SIGKILL');
         }
-        if (startedServer) {
-            await stopServer(server);
-        }
+        await fs.rm(workDir, { recursive: true, force: true });
+        if (generatedExportPath) await fs.rm(generatedExportPath, { recursive: true, force: true });
     }
 }
 

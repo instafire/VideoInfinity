@@ -4,10 +4,11 @@
   "description": "Video Infinity - Interactive Branching Video Studio and Choose-Your-Own-Adventure Engine",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node server_new.js",
     "start:v2": "node server_new.js",
-    "test": "node test/compiler.test.js && node test/timeline.test.js",
-    "test:e2e": "node phase1-e2e.js"
+    "test": "node test/compiler.test.js && node test/timeline.test.js && node --test tests/*.test.js",
+    "test:e2e": "node phase1-e2e.js",
+    "test:v2": "playwright test --config=playwright.config.js"
   },
   "keywords": [
     "interactive-video",
@@ -35,5 +36,8 @@
     "sqlite3": "^5.1.7",
     "uuid": "^13.0.0",
     "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.0"
   }
 }

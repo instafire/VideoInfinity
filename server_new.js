@@ -2,12 +2,14 @@ const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 const fs = require('fs-extra');
+const fsPromises = require('node:fs/promises');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
 const multer = require('multer');
 const rateLimit = require('express-rate-limit');
+const { isLoopbackHost, resolveInside } = require('./server-security');
 
 // --- SECURITY UTILITIES ---
 
@@ -25,14 +27,8 @@ function escapeHtml(str) {
     return str.replace(/[&<>"'\/]/g, char => htmlEscapes[char] || char);
 }
 
-// FIX 2: Path validation to prevent path traversal attacks
 function safePath(baseDir, userPath) {
-    const base = path.resolve(baseDir);
-    const resolved = path.resolve(baseDir, userPath);
-    if (!resolved.startsWith(base)) {
-        return null; // Path traversal attempt detected
-    }
-    return resolved;
+    return resolveInside(baseDir, userPath);
 }
 
 // FIX 3: File content sniffing (magic bytes)
@@ -134,8 +130,10 @@ function ffprobeAsync(filePath) {
 
 // FIX 6: Input validation
 function validateProjectId(id) {
-    const num = parseInt(id, 10);
-    return !isNaN(num) && num > 0 && num < 2147483647;
+    const num = typeof id === 'number'
+        ? id
+        : (typeof id === 'string' && /^\d+$/.test(id) ? Number(id) : NaN);
+    return Number.isSafeInteger(num) && num > 0 && num < 2147483647;
 }
 
 function validateUuid(id) {
@@ -460,9 +458,17 @@ try {
 }
 // -------------------------------------
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '127.0.0.1';
+if (!isLoopbackHost(HOST)) {
+    throw new Error('HOST must be localhost, 127.0.0.1, or ::1; this unauthenticated server is local-only');
+}
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+    throw new Error('PORT must be an integer between 1 and 65535');
+}
 const DB_FILE = process.env.DB_FILE || './database.sqlite';
 const app = express();
+app.disable('x-powered-by');
 
 // FIX 4: Restrict CORS to specific origins (configure as needed)
 const allowedOrigins = new Set([
@@ -498,6 +504,12 @@ const corsOptionsDelegate = (req, callback) => {
 };
 
 app.use(cors(corsOptionsDelegate));
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+});
 
 // FIX 5: Rate limiting to prevent DoS attacks
 const limiter = rateLimit({
@@ -505,8 +517,7 @@ const limiter = rateLimit({
     max: 1000, // Limit each IP to 1000 requests per windowMs (increased for video editing)
     message: { error: 'Too many requests, please try again later.' },
     standardHeaders: true,
-    legacyHeaders: false,
-    trustProxy: 1
+    legacyHeaders: false
 });
 
 // Stricter limiter for upload endpoints
@@ -515,8 +526,7 @@ const uploadLimiter = rateLimit({
     max: 100, // Increased from 20 for bulk operations
     message: { error: 'Too many upload requests, please try again later.' },
     standardHeaders: true,
-    legacyHeaders: false,
-    trustProxy: 1
+    legacyHeaders: false
 });
 
 // Only rate-limit the API. Previously every static request counted too — including the
@@ -530,6 +540,7 @@ app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'studio',
 app.get('/classic', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 // Serve Vue from node_modules so the studio works offline (local-first).
 app.use('/vendor/vue', express.static(path.join(__dirname, 'node_modules', 'vue', 'dist')));
+app.use(express.static(path.join(__dirname, 'public_new')));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // 1. SETUP FOLDERS
@@ -538,7 +549,7 @@ folders.forEach(f => fs.ensureDirSync(path.join(__dirname, 'public', f)));
 
 // 2. DATABASE INIT
 let db;
-(async () => {
+const dbReady = (async () => {
     db = await open({ filename: DB_FILE, driver: sqlite3.Database });
     
     // Core Tables
@@ -636,8 +647,7 @@ const storage = multer.diskStorage({
         fs.ensureDirSync(path.join(__dirname, dest));
         cb(null, path.join(__dirname, dest));
     },
-    // Random suffix avoids collisions when several files arrive in the same millisecond
-    filename: (req, file, cb) => cb(null, `${Date.now()}_${uuidv4().slice(0, 8)}${path.extname(file.originalname).toLowerCase()}`)
+    filename: (req, file, cb) => cb(null, `${uuidv4()}${path.extname(file.originalname).toLowerCase()}`)
 });
 
 const fileFilter = (req, file, cb) => {
@@ -1118,9 +1128,11 @@ app.get('/api/exports', async (req, res) => {
 
 app.post('/api/delete_export', async (req, res) => {
     try {
-        // FIX 2: Path validation to prevent path traversal
-        const cleanName = path.basename(req.body.name);
-        const targetPath = safePath(path.join(__dirname, 'public/exports'), cleanName);
+        const name = req.body?.name;
+        if (typeof name !== 'string' || !/^[a-z0-9_-]{1,240}$/i.test(name)) {
+            return res.status(400).json({ error: 'Invalid export name' });
+        }
+        const targetPath = safePath(path.join(__dirname, 'public/exports'), name);
         if (!targetPath) {
             return res.status(400).json({ error: 'Invalid path' });
         }
@@ -1145,27 +1157,34 @@ const handleSingleUpload = (req, res, next) => {
 };
 
 app.post('/api/upload', uploadLimiter, handleSingleUpload, async (req, res) => {
-    // FIX: Validate projectId properly - default to 1 only if not provided
-    let projectId = req.body.projectId;
-    if (!projectId) projectId = 1;
-    if (!validateProjectId(projectId)) {
-        if (req.file) await fs.unlink(req.file.path).catch(() => {});
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file' });
+    const removeUpload = () => fs.remove(file.path).catch(() => {});
+    const projectId = req.body.projectId ? Number(req.body.projectId) : 1;
+
+    if (!Number.isSafeInteger(projectId) || projectId <= 0 || projectId >= 2147483647) {
+        await removeUpload();
         return res.status(400).json({ error: 'Invalid project ID' });
     }
-    if (!req.file) return res.status(400).json({ error: "No file" });
 
-    const kind = getUploadKind(req.file.originalname);
+    const kind = getUploadKind(file.originalname);
 
-    // FIX 3: Validate the real file content (header sniffing, see sniffMediaContainer)
+    const project = await db.get('SELECT id FROM projects WHERE id = ?', [projectId]);
+    if (!project) {
+        await removeUpload();
+        return res.status(404).json({ error: 'Project not found' });
+    }
+
+    // Validate the real file content (header sniffing, see sniffMediaContainer)
     try {
-        const buffer = await readFileHead(req.file.path, 32);
+        const buffer = await readFileHead(file.path, 32);
         if (!validateMagicBytes(buffer, kind)) {
-            await fs.unlink(req.file.path).catch(() => {});
-            return res.status(400).json({ error: `"${req.file.originalname}" does not look like a valid ${kind} file.` });
+            await removeUpload();
+            return res.status(400).json({ error: `"${file.originalname}" does not look like a valid ${kind} file.` });
         }
     } catch (err) {
         console.error('Magic byte validation error:', err);
-        await fs.unlink(req.file.path).catch(() => {});
+        await removeUpload();
         return res.status(400).json({ error: 'File validation failed' });
     }
 
@@ -1174,8 +1193,8 @@ app.post('/api/upload', uploadLimiter, handleSingleUpload, async (req, res) => {
             return res.json({
                 success: true,
                 type: 'audio',
-                path: `/audio/${req.file.filename}`,
-                name: req.file.originalname
+                path: `/audio/${file.filename}`,
+                name: file.originalname
             });
         }
 
@@ -1183,8 +1202,8 @@ app.post('/api/upload', uploadLimiter, handleSingleUpload, async (req, res) => {
             return res.json({
                 success: true,
                 type: 'image',
-                path: `/images/${req.file.filename}`,
-                name: req.file.originalname
+                path: `/images/${file.filename}`,
+                name: file.originalname
             });
         }
 
@@ -1192,13 +1211,13 @@ app.post('/api/upload', uploadLimiter, handleSingleUpload, async (req, res) => {
             return res.json({
                 success: true,
                 type: 'captions',
-                path: `/captions/${req.file.filename}`,
-                name: req.file.originalname
+                path: `/captions/${file.filename}`,
+                name: file.originalname
             });
         }
 
-        let filename = req.file.filename;
-        let diskPath = req.file.path;
+        let filename = file.filename;
+        let diskPath = file.path;
 
         let metadata;
         try {
@@ -1206,12 +1225,12 @@ app.post('/api/upload', uploadLimiter, handleSingleUpload, async (req, res) => {
         } catch (probeErr) {
             console.error('FFprobe error:', probeErr);
             await fs.unlink(diskPath).catch(() => {});
-            return res.status(400).json({ error: `Could not read "${req.file.originalname}". The file may be corrupted.` });
+            return res.status(400).json({ error: `Could not read "${file.originalname}". The file may be corrupted.` });
         }
 
         if (!(metadata.streams || []).some((s) => s.codec_type === 'video')) {
             await fs.unlink(diskPath).catch(() => {});
-            return res.status(400).json({ error: `"${req.file.originalname}" has no video track.` });
+            return res.status(400).json({ error: `"${file.originalname}" has no video track.` });
         }
 
         // Convert formats the browser cannot play (AVI, MKV/HEVC, ProRes, 10-bit...) so the
@@ -1235,43 +1254,56 @@ app.post('/api/upload', uploadLimiter, handleSingleUpload, async (req, res) => {
                 console.error('Video conversion error:', convertErr);
                 await fs.unlink(diskPath).catch(() => {});
                 await fs.unlink(webDiskPath).catch(() => {});
-                return res.status(500).json({ error: `Could not convert "${req.file.originalname}" to a web-friendly format.` });
+                return res.status(500).json({ error: `Could not convert "${file.originalname}" to a web-friendly format.` });
             }
         }
 
         const webPath = `/videos/${filename}`;
         const duration = Number(metadata.format && metadata.format.duration) || 0;
+        if (!Number.isFinite(duration) || duration <= 0) {
+            await fs.unlink(diskPath).catch(() => {});
+            return res.status(422).json({ error: 'Unable to read video duration' });
+        }
         const thumbnail = await generateThumbnail(diskPath, filename);
-
-        // FIX: Add transaction for atomic operations
+        let transactionStarted = false;
         try {
             await db.exec('BEGIN TRANSACTION');
-            const result = await db.run('INSERT INTO videos (project_id, filename, filepath, thumbnail, duration) VALUES (?, ?, ?, ?, ?)',
-                [projectId, req.file.originalname, webPath, thumbnail, duration]);
-
+            transactionStarted = true;
+            const result = await db.run(
+                'INSERT INTO videos (project_id, filename, filepath, thumbnail, duration) VALUES (?, ?, ?, ?, ?)',
+                [projectId, file.originalname, webPath, thumbnail, duration]
+            );
             const clipId = uuidv4();
-            await db.run('INSERT INTO clips (unique_id, project_id, name, filepath, thumbnail, source_video_id, duration, x, y) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                [clipId, projectId, `FULL: ${req.file.originalname}`, webPath, thumbnail, result.lastID, duration, 100, 100]);
-
+            await db.run(
+                'INSERT INTO clips (unique_id, project_id, name, filepath, thumbnail, source_video_id, duration, x, y) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [clipId, projectId, `FULL: ${file.originalname}`, webPath, thumbnail, result.lastID, duration, 100, 100]
+            );
             await db.exec('COMMIT');
+            transactionStarted = false;
             res.json({
                 success: true,
                 type: 'video',
                 videoId: result.lastID,
                 clipId,
-                name: req.file.originalname,
+                name: file.originalname,
                 path: webPath,
                 thumbnail,
                 duration
             });
-        } catch(dbErr) {
-            await db.exec('ROLLBACK');
-            console.error('Database error:', dbErr);
-            res.status(500).json({ error: 'Failed to save video to database' });
+        } catch (err) {
+            if (transactionStarted) await db.exec('ROLLBACK').catch(() => {});
+            await removeUpload();
+            if (thumbnail) {
+                const thumbnailPath = resolveInside(path.join(__dirname, 'public'), thumbnail);
+                if (thumbnailPath) await fs.remove(thumbnailPath).catch(() => {});
+            }
+            console.error('Database error:', err);
+            return res.status(500).json({ error: 'Failed to save video to database' });
         }
-    } catch(err) {
+    } catch (err) {
+        await removeUpload();
         console.error('Upload error:', err);
-        res.status(500).json({ error: 'Upload failed' });
+        return res.status(500).json({ error: 'Upload failed' });
     }
 });
 
@@ -1332,8 +1364,8 @@ app.post('/api/delete_clips_bulk', async (req, res) => {
                 continue;
             }
             try {
-                const filepath = path.join(__dirname, 'public', clip.filepath);
-                if (await fs.pathExists(filepath)) {
+                const filepath = safePath(path.join(__dirname, 'public'), clip.filepath);
+                if (filepath && await fs.pathExists(filepath)) {
                     await fs.unlink(filepath);
                 }
             } catch (e) {
@@ -1462,8 +1494,8 @@ app.post('/api/clip', async (req, res) => {
             return res.status(404).json({ error: 'Source video not found' });
         }
         
-        const sourcePath = path.join(__dirname, 'public', video.filepath);
-        if (!await fs.pathExists(sourcePath)) {
+        const sourcePath = safePath(path.join(__dirname, 'public'), video.filepath);
+        if (!sourcePath || !await fs.pathExists(sourcePath)) {
             return res.status(404).json({ error: 'Source video file not found' });
         }
         
@@ -1585,8 +1617,8 @@ app.post('/api/create_event_clip', async (req, res) => {
             return res.status(404).json({ error: 'Source video not found' });
         }
         
-        const sourcePath = path.join(__dirname, 'public', video.filepath);
-        if (!await fs.pathExists(sourcePath)) {
+        const sourcePath = safePath(path.join(__dirname, 'public'), video.filepath);
+        if (!sourcePath || !await fs.pathExists(sourcePath)) {
             return res.status(404).json({ error: 'Source video file not found' });
         }
         
@@ -2500,35 +2532,36 @@ app.post('/api/publish', async (req, res) => {
 
         // Copy files and update paths
         for (const clip of clips) {
-            const src = path.join(__dirname, 'public', clip.filepath); 
-            const filename = path.basename(clip.filepath); 
-            const dest = path.join(exportPath, 'clips', filename);
-            
-            if(await fs.pathExists(src)) { 
-                await fs.copy(src, dest); 
-                clip.filepath = `clips/${filename}`; 
+            const src = safePath(path.join(__dirname, 'public'), clip.filepath);
+            if (src && await fs.pathExists(src)) {
+                const filename = path.basename(src);
+                await fs.copy(src, path.join(exportPath, 'clips', filename));
+                clip.filepath = `clips/${filename}`;
+            } else {
+                clip.filepath = '';
             }
             
             if(clip.thumbnail) { 
-                const thumbName = path.basename(clip.thumbnail); 
-                const thumbSrc = path.join(__dirname, 'public', clip.thumbnail);
-                if(await fs.pathExists(thumbSrc)) { 
-                    await fs.copy(thumbSrc, path.join(exportPath, 'clips', thumbName)); 
-                    clip.thumbnail = `clips/${thumbName}`; 
-                } 
+                const thumbSrc = safePath(path.join(__dirname, 'public'), clip.thumbnail);
+                if (thumbSrc && await fs.pathExists(thumbSrc)) {
+                    const thumbName = path.basename(thumbSrc);
+                    await fs.copy(thumbSrc, path.join(exportPath, 'clips', thumbName));
+                    clip.thumbnail = `clips/${thumbName}`;
+                } else {
+                    clip.thumbnail = '';
+                }
             }
             
             // --- FIX 9: ROBUST PATH HANDLING ---
             if(clip.bg_music) { 
-                // Handle cases where path might be absolute or relative or hardcoded
-                const cleanPath = clip.bg_music.replace(/^\/+/, ''); // Remove leading slashes
-                const audSrc = path.join(__dirname, 'public', cleanPath); 
-                const audName = path.basename(clip.bg_music); 
-                
-                if(await fs.pathExists(audSrc)) { 
-                    await fs.copy(audSrc, path.join(exportPath, 'audio', audName)); 
-                    clip.bg_music = `audio/${audName}`; 
-                } 
+                const audSrc = safePath(path.join(__dirname, 'public'), clip.bg_music);
+                if (audSrc && await fs.pathExists(audSrc)) {
+                    const audName = path.basename(audSrc);
+                    await fs.copy(audSrc, path.join(exportPath, 'audio', audName));
+                    clip.bg_music = `audio/${audName}`;
+                } else {
+                    clip.bg_music = null;
+                }
             }
         }
 
@@ -3446,11 +3479,23 @@ app.post('/api/publish', async (req, res) => {
 
 app.use((err, req, res, next) => {
     console.error('Server error:', err);
+    if (err instanceof multer.MulterError) {
+        const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+        return res.status(status).json({ error: status === 413 ? 'Upload exceeds the file-size limit' : 'Upload rejected' });
+    }
+    if (err.message?.startsWith('Invalid file type.')) {
+        return res.status(400).json({ error: 'Unsupported upload type' });
+    }
     // FIX 7: Don't expose err.message in production
     res.status(500).json({ error: 'Internal server error' });
 });
 
-const server = app.listen(PORT, () => console.log(`Studio Infinity v20.13 (Optimized) Running: http://localhost:${PORT}`));
-// Large uploads (and converting non-web formats on import) can take longer than Node's
-// default 5 minute request timeout.
-server.requestTimeout = 2 * 60 * 60 * 1000;
+dbReady.then(() => {
+    const server = app.listen(PORT, HOST, () => console.log(`Studio Infinity v20.13 (Optimized) Running: http://${HOST}:${PORT}`));
+    // Large uploads (and converting non-web formats on import) can take longer than Node's
+    // default 5 minute request timeout.
+    server.requestTimeout = 2 * 60 * 60 * 1000;
+}).catch((err) => {
+    console.error('Database initialization failed; server was not started.', err);
+    process.exit(1);
+});
